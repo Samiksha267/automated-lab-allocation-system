@@ -183,13 +183,31 @@ Real association entities `(subject_id, software_id)` / `(subject_id, equipment_
 
 ---
 
-## 6. Faculty Availability
+## 6. Faculty Availability — **implemented (Phase 7)**
 
-### `faculty_availability`
-**Key fields:** `id`, `faculty_id`, `day_of_week` (MON..SUN), `start_time`, `end_time`, `academic_term_id` (nullable — **decision: term-scoped availability is supported but optional**; a null term means "applies every term until changed," matching how most faculty availability is actually communicated ("I'm free Tue/Thu mornings") without forcing term-by-term re-entry for the common case).
-**Constraint:** application-level validation rejects overlapping availability rows for the same `(faculty_id, day_of_week, term)` — two overlapping "available" windows are redundant/ambiguous and are rejected at write time rather than silently merged.
-**Future extension (documented, not built in Phase 1):** a `faculty_unavailability_exception` table (single-date overrides, e.g. "faculty on leave March 5") would layer on top of the recurring weekly pattern without changing this table's shape — noted in [18-FUTURE-IMPROVEMENTS.md](18-FUTURE-IMPROVEMENTS.md).
-**Used by:** HC-03 Faculty Availability.
+### `faculty_availability` (Flyway `V9__create_faculty_availability.sql`)
+**Actual columns:** `id`, `faculty_id` (FK, `NOT NULL`), `academic_term_id` (FK, **`NOT NULL`**), `day_of_week` (`VARCHAR(16)`, `CHECK` against the seven `java.time.DayOfWeek` names), `start_time`/`end_time` (`TIME`), `active` (`BOOLEAN NOT NULL DEFAULT TRUE`), `created_at`, `updated_at`.
+
+**Term-scoping decision — superseding the Phase 1 draft:** this document originally sketched `academic_term_id` as **nullable**, with a null term meaning "applies every term" (docs/ASSUMPTIONS.md A-15). Phase 7 implemented `academic_term_id` as **mandatory** instead, per the phase brief's explicit recommendation ("do not make availability permanently global to a faculty member unless there is a strong reason") — a faculty's weekly availability genuinely can and does change semester to semester (the brief's own example: Semester 5 Monday mornings vs. Semester 6 Monday afternoons), and a nullable "applies forever" row would silently misrepresent that. See ADR-031 in [15-DESIGN-DECISIONS.md](15-DESIGN-DECISIONS.md) and A-32 in [ASSUMPTIONS.md](ASSUMPTIONS.md) (A-15 marked superseded, not deleted).
+
+**Half-open interval `[start_time, end_time)`** — same semantics used throughout the project. **Check:** `end_time > start_time` (`chk_faculty_availability_interval`), mirrored by application validation (`INVALID_AVAILABILITY_INTERVAL`) for a clean typed error before the database is ever touched.
+
+**Overlap protection — Option A (application validation only), not a PostgreSQL exclusion constraint:** overlapping *active* rows for the same `(faculty_id, academic_term_id, day_of_week)` are rejected at write time (`FACULTY_AVAILABILITY_OVERLAP`, 409) by `FacultyAvailabilityService`, never silently merged. A PostgreSQL exclusion constraint (Option B) was evaluated and rejected — see ADR-032 for the full analysis; the short version is that PostgreSQL has no native recurring-weekly range type, and availability data is low-volume and administratively mutated, so a generated-range + `EXCLUDE USING gist` constraint would add real complexity for a guarantee application validation already provides adequately.
+
+**Adjacent rows are permitted** (e.g. `09:00-12:00` and `12:00-15:00` for the same faculty/term/day) — never merged into a single row (keeps administrative intent explicit, ADR-032) but treated as one continuous window during **evaluation only** (`FacultyAvailabilityService.isAvailable`, never mutating the database — see docs/05-SCHEDULING-ENGINE.md).
+
+**Multiple windows per day are supported** — no uniqueness constraint limits a faculty to one row per day; only *overlapping* active rows for the same day are rejected.
+
+**`active` — soft deactivation, not physical delete:** unlike `LabUnavailability` (Phase 5, hard-deleted — a one-off dated event with no ongoing recurrence), a `faculty_availability` row represents an enduring weekly template, so deactivation (`active=false`) was chosen to match this project's dominant historical-entity pattern (Program, Faculty, Software, ...) rather than physically removing it. See ADR-033.
+
+**Missing availability means unavailable, never "available all day":** a faculty with zero active rows for a given `(term, day)` is evaluated as unavailable for every request on that day — the absence of data is never treated as an implicit "always free." This is a deliberate application-layer semantic (`FacultyAvailabilityService.isAvailable` returns `false` on an empty result set), not something the database enforces directly.
+
+**Inactive faculty:** `FacultyAvailabilityService` rejects new availability for an inactive `Faculty` (`FACULTY_INACTIVE`, 400) and `isAvailable(...)` always returns `false` for an inactive faculty regardless of any stored rows — an availability row for a faculty who has since been deactivated is never treated as making them schedulable.
+
+**Indexes:** `(faculty_id)`, `(academic_term_id)`, and a partial composite `(faculty_id, academic_term_id, day_of_week) WHERE active` — the hot lookup path for both overlap validation and availability evaluation.
+
+**Future extension (documented, not built):** a `faculty_unavailability_exception` table (single-date overrides, e.g. "faculty on leave March 5") would layer on top of this recurring weekly pattern without changing this table's shape — noted in [18-FUTURE-IMPROVEMENTS.md](18-FUTURE-IMPROVEMENTS.md).
+**Used by:** HC-03 Faculty Availability (docs/06-CONSTRAINTS.md) — the source data now exists; the actual `FacultyAvailabilityConstraint` class remains Phase 9+.
 
 ---
 
@@ -295,7 +313,7 @@ erDiagram
     LAB ||--o{ LAB_UNAVAILABILITY : "unavailable during"
 
     FACULTY ||--o{ FACULTY_AVAILABILITY : "available during"
-    ACADEMIC_TERM ||--o{ FACULTY_AVAILABILITY : "scoped to (nullable)"
+    ACADEMIC_TERM ||--o{ FACULTY_AVAILABILITY : "scoped to (mandatory)"
 
     ACADEMIC_TERM ||--o{ SCHEDULE_VERSION : has
     SCHEDULE_VERSION ||--o{ ALLOCATION : contains
@@ -315,7 +333,7 @@ erDiagram
 
 This matches §3/§5 of [03-SYSTEM-ARCHITECTURE.md](03-SYSTEM-ARCHITECTURE.md) exactly; that document's ER diagram will be updated to reference this one rather than duplicating it.
 
-**Implementation status against this diagram (Phase 6):** `PROGRAM`, `STREAM`, `ACADEMIC_YEAR`, `DIVISION`, `BATCH`, `ACADEMIC_TERM`, `SUBJECT`, `FACULTY`, `SUBJECT_FACULTY_ASSIGNMENT`, `CR_ASSIGNMENT`, `APP_USER` (Phase 4); `LAB_TYPE`, `LAB`, `SOFTWARE`, `EQUIPMENT`, `LAB_SOFTWARE`, `LAB_EQUIPMENT`, `LAB_UNAVAILABILITY` (Phase 5); `SUBJECT_SOFTWARE_REQUIREMENT`, `SUBJECT_EQUIPMENT_REQUIREMENT`, `subject.required_lab_type_id`/`preferred_lab_type_id` (Phase 6) are all real, migrated tables/columns. Everything else in this diagram (`SCHEDULE_VERSION`, `ALLOCATION`, `TIMETABLE_IMPORT*`, `AUDIT_LOG`, `FACULTY_AVAILABILITY`) remains the Phase 1 plan, not yet implemented — Phase 7+ per the roadmap.
+**Implementation status against this diagram (Phase 7):** `PROGRAM`, `STREAM`, `ACADEMIC_YEAR`, `DIVISION`, `BATCH`, `ACADEMIC_TERM`, `SUBJECT`, `FACULTY`, `SUBJECT_FACULTY_ASSIGNMENT`, `CR_ASSIGNMENT`, `APP_USER` (Phase 4); `LAB_TYPE`, `LAB`, `SOFTWARE`, `EQUIPMENT`, `LAB_SOFTWARE`, `LAB_EQUIPMENT`, `LAB_UNAVAILABILITY` (Phase 5); `SUBJECT_SOFTWARE_REQUIREMENT`, `SUBJECT_EQUIPMENT_REQUIREMENT`, `subject.required_lab_type_id`/`preferred_lab_type_id` (Phase 6); `FACULTY_AVAILABILITY` (Phase 7) are all real, migrated tables/columns. Everything else in this diagram (`SCHEDULE_VERSION`, `ALLOCATION`, `TIMETABLE_IMPORT*`, `AUDIT_LOG`) remains the Phase 1 plan, not yet implemented — Phase 8+ per the roadmap.
 
 ---
 

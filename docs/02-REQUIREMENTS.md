@@ -2,7 +2,7 @@
 
 Requirement IDs are stable identifiers for traceability to tests (unit/integration test names should reference the FR/NFR/HC ID they cover where practical). Hard scheduling constraints (HC-01..HC-12) are specified separately in [06-CONSTRAINTS.md](06-CONSTRAINTS.md) once that file is created (Phase 9); they are cross-referenced here.
 
-**Status:** Requirements marked ✅ are implemented and verified as of Phase 6. Everything else remains planned.
+**Status:** Requirements marked ✅ are implemented and verified as of Phase 7. Everything else remains planned.
 
 ## Functional Requirements
 
@@ -16,7 +16,7 @@ Requirement IDs are stable identifiers for traceability to tests (unit/integrati
 ### Academic Structure
 - **FR-06** ✅ Lab Assistant can manage the academic hierarchy (Program, Stream, Academic Year, Division, Batch) with a configurable number of divisions per year and batches per division. *(Phase 4 — full CRUD via `/api/programs`, `/api/streams`, `/api/academic-years`, `/api/divisions`, `/api/batches`; no hardcoded counts anywhere, verified with the seeded 4-stream/4-year B.Tech + 2-stream/3-year MBA Tech hierarchy.)*
 - **FR-07** ✅ Lab Assistant can manage Subjects *(Phase 4 — `/api/subjects`)* and their software/equipment/lab-type requirements *(Phase 6 — `/api/subjects/{id}/requirements`, `/software-requirements`, `/equipment-requirements`, `/lab-type-requirement`; verified with BDA requiring Cloudera + preferring the Data Engineering lab type, and CNS carrying zero requirements to prove the optional path)*. Matching these requirements against lab capabilities is not yet implemented — that is the Constraint Engine, Phase 9.
-- **FR-08 (partial)** ✅ Lab Assistant can manage Faculty records *(Phase 4 — `/api/faculty`)*. Faculty Availability windows are **not yet implemented** (Phase 7).
+- **FR-08** ✅ Lab Assistant can manage Faculty records *(Phase 4 — `/api/faculty`)* and their weekly, term-scoped availability windows *(Phase 7 — `/api/faculty/{id}/availability*`; verified with Faculty BDA/CNS's seeded Monday/Tuesday/Wednesday windows, including a deliberate Monday 12:00-14:00 gap in BDA's schedule proving "not available" is correctly computed, not just "available"). Availability is a hard boundary (HC-03) for the future scheduling engine — actually enforcing it during allocation is Phase 9+.
 
 ### Lab Inventory
 - **FR-09** ✅ Lab Assistant can manage Labs (code, name, capacity, wing, floor, room number, lab type, active flag). *(Phase 5 — `/api/labs`, `/api/lab-types`; verified with 15 seeded labs across wings B/C/D.)*

@@ -2,7 +2,7 @@
 
 Three authenticated roles: `LAB_ASSISTANT`, `CR`, `STUDENT`. Faculty has no login (A-08). All enforcement below is server-side (Spring Security method/URL security + service-layer ownership checks); the frontend hides controls it shouldn't show, but that is a UX convenience only — every rule here is re-checked in the backend regardless of what the client sends.
 
-**Status: Phase 4.** Sections marked *(implemented)* describe real, verified code. Academic hierarchy (Program/Stream/AcademicYear/AcademicTerm/Division/Batch), Subject, Faculty, SubjectFacultyAssignment, and CrAssignment are now real and RBAC-enforced (see the Permission Matrix below, and the Role vs. Ownership section). Labs, allocations, and everything scheduling-related remain the Phase 1 plan, not yet implemented (Phase 5+).
+**Status: Phase 7.** Sections marked *(implemented)* describe real, verified code. Academic hierarchy (Program/Stream/AcademicYear/AcademicTerm/Division/Batch), Subject (+ requirements), Faculty (+ availability), SubjectFacultyAssignment, CrAssignment, and the Laboratory domain are now real and RBAC-enforced (see the Permission Matrix below, and the Role vs. Ownership section). Allocations and everything scheduling-related remain the Phase 1 plan, not yet implemented (Phase 8+).
 
 ## Authentication Flow *(implemented)*
 
@@ -129,7 +129,7 @@ Legend: R = Read, C = Create, U = Update, D = Delete/Cancel, A = Approve, P = Pu
 | Lab–Software / Lab–Equipment links | R, C, U, D | R | — |
 | Lab unavailability (maintenance) | R, C, U, D | R | — |
 | Faculty | R, C, U, D | R | — |
-| Faculty availability | R, C, U, D | R | — |
+| Faculty availability (raw management data) | R, C, U, D | — | — |
 | Subjects + requirements | R, C, U, D | R | — |
 | Academic hierarchy (Program/Stream/Year/Division/Batch) | R, C, U, D | R (own scope only) | R (published, filter-only) |
 | CR accounts (`app_user` role=CR) | R, C, U, D | — | — |
@@ -154,6 +154,7 @@ Legend: R = Read, C = Create, U = Update, D = Delete/Cancel, A = Approve, P = Pu
 - **Student has zero write access anywhere** — every student-facing endpoint is `GET`.
 - **Lab Assistant is the only role that can `APPROVE`** (timetable import entries → allocations) and `PUBLISH` (schedule versions).
 - **Faculty availability, software requirements, and lab data are never editable by CR**, even for their own division's subjects — these are shared academic-configuration resources, not division-scoped data.
+- **Faculty availability is CR/STUDENT-unreadable, not just uneditable (Phase 7, deliberate)** — unlike Labs (Phase 5) and Subject Requirements (Phase 6), where `GET` is open to any authenticated role, `/api/faculty/{id}/availability*` restricts read to `LAB_ASSISTANT` as well. This is a narrower access model than the rest of this project's read-open convention, chosen because raw availability management data has no legitimate CR/STUDENT consumer yet — see docs/15-DESIGN-DECISIONS.md ADR-034 and docs/03-SYSTEM-ARCHITECTURE.md §15.
 
 ## Enforcement Mechanism
 

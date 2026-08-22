@@ -1,5 +1,21 @@
 # Scheduling Engine
 
+**Status (Phase 7):** `SchedulingContext`'s "faculty availability rows" input (line item in the Domain Objects table below) is no longer a placeholder — `faculty_availability` (mandatory term-scoped, half-open interval) and `FacultyAvailabilityService.isAvailable(...)` (docs/04-DATABASE-DESIGN.md §6, docs/06-CONSTRAINTS.md HC-03) are both real and independently verified. No `SchedulingConstraint`/`FacultyAvailabilityConstraint` code exists yet — this remains a design document for the engine itself until Phase 9.
+
+## Faculty Availability → Future Constraint Validation (Phase 7 data, Phase 9 constraint)
+
+```
+SubjectFacultyAssignment resolves "which faculty teaches this" (Phase 4, FacultyAssignmentResolutionService)
+      ↓
+FacultyAvailabilityService.isAvailable(facultyId, academicTermId, dayOfWeek, start, end)   (Phase 7 - reusable domain logic, not itself a constraint)
+      ↓
+FacultyAvailabilityConstraint (Phase 9+ - not yet implemented) wraps the above as a SchedulingConstraint
+      ↓
+Rejected candidates carry ConstraintViolation{errorCode: "FACULTY_UNAVAILABLE", ...} (docs/06-CONSTRAINTS.md HC-03)
+```
+
+`FacultyAvailabilityService` reuses `TimeIntervalUtils` (`com.college.laballocation.common`, half-open `[start, end)` semantics — `isValid`/`overlaps`/`contains`) for all interval math, specifically so the future `FacultyAvailabilityConstraint`, `FacultyConflictConstraint` (HC-02), and `LabConflictConstraint` (HC-01) can share the same overlap/containment formulas rather than each reimplementing them (PART 8 of the Phase 7 brief). This is the first concrete reuse of that shared utility — introduced now so later constraint classes have it ready rather than retrofitting a shared formula after three near-duplicate implementations already exist.
+
 ## Problem Formulation
 
 Given a set of session requirements (subject, target batch/division, requested or flexible date/time), assign each a (lab, faculty, time) triple such that:

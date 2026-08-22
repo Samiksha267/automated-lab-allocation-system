@@ -54,11 +54,12 @@ startA < endB   AND   startB < endA
 
 ## HC-03 — Faculty Availability
 
-- **Rule:** A session may only be scheduled within a faculty member's declared `faculty_availability` window(s) for that day of week (and term, if scoped).
-- **Inputs:** `faculty_id`, `day_of_week` derived from `date`, candidate interval; matching `faculty_availability` rows.
-- **Reject when:** no availability row for that faculty/day fully contains the candidate interval.
+- **Rule:** A session may only be scheduled within a faculty member's declared `faculty_availability` window(s) for that day of week and term.
+- **Inputs:** `faculty_id`, `academic_term_id`, `day_of_week` derived from `date`, candidate interval; matching active `faculty_availability` rows.
+- **Reject when:** no availability row (or continuous run of adjacent rows) for that faculty/term/day fully contains the candidate interval — including when there are zero rows at all (absence means unavailable, never "available all day").
 - **Valid example:** Faculty available Mon 09:00–13:00; candidate Mon 09:00–11:00 → contained → valid.
 - **Invalid example:** Faculty available Mon 09:00–13:00; candidate Mon 12:30–14:30 → not fully contained → rejected.
+- **Source data implemented, Phase 7:** `faculty_availability` (mandatory `academic_term_id`, half-open `[start_time, end_time)`, overlap-rejected at write time, adjacent rows permitted — see docs/04-DATABASE-DESIGN.md §6) and `FacultyAvailabilityService.isAvailable(...)` (the reusable evaluation logic — merges adjacent stored rows for evaluation only, never mutates the database) both exist and are independently verified today. **Not implemented yet:** the actual `FacultyAvailabilityConstraint` class that plugs this evaluation into the scheduling pipeline (`SchedulingContext` → candidate validation, docs/05-SCHEDULING-ENGINE.md) — Phase 9+. Distinct from HC-02 (Faculty Conflict, an already-*booked* overlap) — see docs/03-SYSTEM-ARCHITECTURE.md for the availability-vs-conflict distinction.
 - **Error code:** `FACULTY_UNAVAILABLE`.
 
 ## HC-04 — Batch Conflict

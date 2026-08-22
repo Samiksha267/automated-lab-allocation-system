@@ -434,3 +434,58 @@ ADR-style log of significant, hard-to-reverse decisions. Each entry: Context, De
 **Reasons:** No real scenario in this project's scope (BDA/Cloudera, the seeded demo data) needs version-level discrimination, and introducing a version-comparison concept (semantic versioning? exact string match? minimum-version?) would be speculative complexity with no consumer — the same reasoning as ADR-026's rejected boolean flag.
 
 **Trade-offs:** If a future phase's constraint engine needs "lab has Cloudera >= 6.3," this will require a new column/comparison operator on the requirement row — a real, acknowledged gap, tracked here and in docs/06-CONSTRAINTS.md rather than silently absent.
+
+---
+
+## ADR-031: Faculty Availability Is Term-Scoped Mandatorily — Supersedes the Phase 1 Draft
+
+**Context:** docs/04-DATABASE-DESIGN.md's Phase 1 draft modeled `faculty_availability.academic_term_id` as nullable, with a null value meaning "applies every term" (docs/ASSUMPTIONS.md A-15) — chosen at the time to avoid forcing term-by-term re-entry for the common case. Phase 7's brief explicitly asked this to be re-reviewed, and recommended making it mandatory instead.
+
+**Decision:** `faculty_availability.academic_term_id` is `NOT NULL`. Every availability row belongs to exactly one term; there is no "applies forever" row.
+
+**Alternatives:** The original nullable design was seriously considered (it was already written into the Phase 1 plan) — rejected because a faculty's real availability genuinely changes semester to semester (the phase brief's own example: Monday mornings free in one semester, Monday afternoons in the next), and a nullable "applies every term" row would silently misrepresent that the moment it happened, with no structural signal that the data had gone stale.
+
+**Reasons:** Term-scoping matches how this project already treats every other term-relative fact (`SubjectFacultyAssignment`, `CrAssignment` — both already term-scoped, Phase 4) — faculty availability being the one term-relative concept modeled as term-agnostic would have been the inconsistent choice, not the mandatory one.
+
+**Trade-offs:** A Lab Assistant must re-enter (or the future UI must offer to copy) availability for each new term, rather than it persisting automatically — a real data-entry cost, accepted because silently-stale "forever" availability is a worse failure mode for a hard constraint's source data than an explicit re-entry step. See A-32 in ASSUMPTIONS.md (A-15 marked superseded, not deleted, per this project's standing practice of recording changed decisions rather than erasing them).
+
+---
+
+## ADR-032: Faculty Availability Overlap — Application Validation Only, Reject Rather Than Merge
+
+**Context:** Two related questions needed a decision: (1) how to prevent overlapping availability rows for the same faculty/term/day, and (2) what to do when a Lab Assistant's input actually overlaps an existing row.
+
+**Decision (overlap prevention — Option A over Option B):** Application-level validation only (`FacultyAvailabilityService` queries existing active rows and checks for overlap before insert/update); no PostgreSQL exclusion constraint.
+**Decision (overlap handling):** Reject the write with `FACULTY_AVAILABILITY_OVERLAP` (409). Never silently merge two overlapping inputs into one combined row.
+
+**Alternatives considered for overlap prevention:** A PostgreSQL `EXCLUDE USING gist` constraint over a generated range type, mirroring how a genuinely recurring-weekly range might be modeled with a custom range type or a synthetic `(day_of_week, start_time, end_time)` composite range. Rejected: PostgreSQL has no built-in recurring-weekly range type (only `tsrange`/`tstzrange` for actual timestamps), so this would require either a custom range type or an application-computed helper column purely to feed the exclusion constraint — real, non-obvious complexity for data that is low-volume and administratively mutated (a handful of Lab Assistant edits per faculty per term, not a high-concurrency write path). The `chk_faculty_availability_interval` `CHECK (end_time > start_time)` constraint remains a genuine, non-bypassable database guarantee; only the *cross-row* overlap guarantee is application-only.
+
+**Alternatives considered for overlap handling:** Silently merging `09:00-12:00` + `11:00-14:00` into a single `09:00-14:00` row. Rejected per the phase brief's explicit instruction — merging hides administrative intent (did the Lab Assistant mean to extend the window, or make a data-entry mistake?) and complicates the audit trail of what was actually entered, for a convenience that a clear rejection message achieves just as well (the Lab Assistant can delete/re-enter deliberately).
+
+**Trade-offs:** Should this data ever become high-concurrency (unlikely for administratively-mutated availability), the application-only overlap check has the standard TOCTOU race-condition exposure of a read-then-write pattern without a database-level guarantee — acceptable at this project's actual scale and mutation pattern, noted here rather than silently assumed safe.
+
+---
+
+## ADR-033: Faculty Availability Uses Soft Deactivation (`active` flag), Not Physical Delete
+
+**Context:** `LabUnavailability` (Phase 5, ADR-024) set a hard-delete precedent for a dated, one-off administrative record with no ongoing recurrence and no downstream consumer. `FacultyAvailability` needed its own explicit decision (PART 25 of the phase brief), not an automatic copy of that precedent.
+
+**Decision:** `FacultyAvailability.active` (boolean, default `true`); `DELETE /api/faculty/{id}/availability/{availabilityId}` sets `active=false` rather than removing the row.
+
+**Reasons:** A `FacultyAvailability` row represents an enduring weekly template (a faculty's standing Monday-morning slot), not a one-off dated event like a maintenance window — it is architecturally closer to `Faculty`, `Software`, or `Program` (all soft-deactivated, this project's dominant pattern) than to `LabUnavailability`. Overlap validation and availability evaluation both already need to filter on "active" rows regardless (to distinguish current from superseded windows), so the column exists as a natural query filter rather than purely as an audit mechanism — soft deactivation was effectively "free" given that need, unlike `LabUnavailability` where no such filtering need existed.
+
+**Trade-offs:** None significant — matches the project's own more common pattern; the one place this diverges from `LabUnavailability` is deliberate and explained by the entities' different natures (recurring template vs. one-off event), not an inconsistency.
+
+---
+
+## ADR-034: Faculty Availability Read Access Restricted to LAB_ASSISTANT — Narrower Than Phase 5/6
+
+**Context:** Every prior read-heavy domain in this project (Labs, Software/Equipment catalogs, Subject Requirements) opens `GET` to any authenticated role, reserving `LAB_ASSISTANT` for mutations only. The Phase 7 brief explicitly raised the question of whether that same open-read pattern makes sense for faculty availability, and recommended restricting it.
+
+**Decision:** `/api/faculty/{facultyId}/availability*` (including the `/check` preview endpoint) requires `LAB_ASSISTANT` for **both** read and write. CR and STUDENT receive `403` on every method, not just mutations.
+
+**Alternatives:** Following the established open-read convention (CR/STUDENT can `GET`) — rejected because, unlike Lab capacity/software (genuinely useful for a CR to see when planning an extra-lab request) or subject requirements (informative context), raw faculty-availability rows have no legitimate consumer outside the Lab Assistant and the future constraint engine (which will call `FacultyAvailabilityService` directly, never through this REST surface) — exposing it to CR/STUDENT would be surface area with no real use case behind it, at least for now.
+
+**Reasons:** This project's default posture on new surface area is to open only what has a demonstrated need (the same reasoning behind not adding speculative columns, ADR-026/ADR-030) — read access is not free just because other domains happened to open it, each domain's access model is a decision, not an inherited default.
+
+**Trade-offs:** If a future phase determines CRs genuinely need to see faculty availability (e.g. to explain why an extra-lab request failed), this endpoint would need to be reopened for CR reads specifically — a straightforward, backward-compatible change (loosening `@PreAuthorize`, not a breaking one) tracked here rather than pre-emptively built now on a guess.

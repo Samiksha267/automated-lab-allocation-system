@@ -1,6 +1,6 @@
 # API Documentation
 
-**Status:** Auth (`/api/auth/*`, Phase 3), the academic domain (Phase 4), the laboratory domain (Phase 5), and subject requirements (`/api/subjects/{id}/requirements`, `/software-requirements`, `/equipment-requirements`, `/lab-type-requirement`, Phase 6) are **implemented and verified**. Everything else below (allocations, scheduling) remains the Phase 1 contract-level plan — not yet implemented. **No entity is exposed directly — every endpoint speaks DTOs**, never raw JPA entities.
+**Status:** Auth (`/api/auth/*`, Phase 3), the academic domain (Phase 4), the laboratory domain (Phase 5), subject requirements (`/api/subjects/{id}/requirements`, `/software-requirements`, `/equipment-requirements`, `/lab-type-requirement`, Phase 6), and faculty availability (`/api/faculty/{id}/availability*`, Phase 7) are **implemented and verified**. Everything else below (allocations, scheduling) remains the Phase 1 contract-level plan — not yet implemented. **No entity is exposed directly — every endpoint speaks DTOs**, never raw JPA entities.
 
 ## Conventions
 
@@ -159,23 +159,26 @@ Example `GET .../requirements` response (BDA, as actually seeded and verified):
 }
 ```
 
-### `/api/faculty`
-| Method | Path | Roles | Purpose |
-|---|---|---|---|
-| GET | `/api/faculty` | LAB_ASSISTANT, CR | List faculty |
-| POST | `/api/faculty` | LAB_ASSISTANT | Create faculty |
-| POST | `/api/faculty/{id}/availability` | LAB_ASSISTANT | Add availability window |
-| GET | `/api/faculty/{id}/availability` | LAB_ASSISTANT | View availability |
+### Faculty Availability — **implemented (Phase 7)**
 
-### `/api/subjects`
-| Method | Path | Roles | Purpose |
-|---|---|---|---|
-| GET | `/api/subjects?academicYearId=` | all | List subjects |
-| POST | `/api/subjects` | LAB_ASSISTANT | Create subject |
-| PUT | `/api/subjects/{id}/software-requirements` | LAB_ASSISTANT | Set required software (ALL-required semantics) |
-| PUT | `/api/subjects/{id}/equipment-requirements` | LAB_ASSISTANT | Set required equipment |
-| PATCH | `/api/subjects/{id}` | LAB_ASSISTANT | Set `requiredLabTypeId` (nullable) |
-| POST | `/api/subjects/{id}/faculty-assignments` | LAB_ASSISTANT | Assign faculty for (division[, batch], term) |
+Deliberately restricted to `LAB_ASSISTANT` for **read and write alike** — see the Access Model note in docs/03-SYSTEM-ARCHITECTURE.md §15 and docs/09-AUTHORIZATION-RBAC.md for why this is narrower than Phase 5/6's open-read convention. `/check` is an **administrative preview only** — it answers "is this faculty available right now, per stored data," never a scheduling/conflict validation (that remains Phase 9's constraint engine).
+
+| Method | Path | Roles | Purpose | Key failure codes |
+|---|---|---|---|---|
+| GET | `/api/faculty/{facultyId}/availability?academicTermId=&dayOfWeek=` | LAB_ASSISTANT | List availability windows, optionally filtered | `FACULTY_NOT_FOUND` |
+| POST | `/api/faculty/{facultyId}/availability` | LAB_ASSISTANT | Add a window (`academicTermId`, `dayOfWeek`, `startTime`, `endTime`) | `FACULTY_NOT_FOUND`, `FACULTY_INACTIVE`, `ACADEMIC_TERM_NOT_FOUND`, `VALIDATION_ERROR` (CLOSED term), `INVALID_AVAILABILITY_INTERVAL`, `FACULTY_AVAILABILITY_OVERLAP` |
+| PATCH | `/api/faculty/{facultyId}/availability/{availabilityId}` | LAB_ASSISTANT | Update `dayOfWeek`/`startTime`/`endTime` | `FACULTY_AVAILABILITY_NOT_FOUND`, `INVALID_AVAILABILITY_INTERVAL`, `FACULTY_AVAILABILITY_OVERLAP` |
+| DELETE | `/api/faculty/{facultyId}/availability/{availabilityId}` | LAB_ASSISTANT | Deactivate (`active=false` — soft, see docs/15-DESIGN-DECISIONS.md ADR-033) | `FACULTY_AVAILABILITY_NOT_FOUND` |
+| GET | `/api/faculty/{facultyId}/availability/check?academicTermId=&dayOfWeek=&startTime=&endTime=` | LAB_ASSISTANT | Administrative preview: is the faculty available for this exact interval, per stored data | `FACULTY_NOT_FOUND` |
+
+Example `GET .../check` response (BDA, Monday, as actually seeded and verified):
+```json
+{ "facultyId": 1, "academicTermId": 1, "dayOfWeek": "MONDAY", "startTime": "09:00:00", "endTime": "11:00:00", "available": true }
+```
+
+### `/api/faculty` and `/api/subjects` — see Phase 4/6 sections above
+
+The full CRUD surface for `/api/faculty` (list/create/update) is documented under "Subject / Faculty — implemented (Phase 4)" above; the full `/api/subjects/{id}/requirements` surface is documented under "Subject Requirements — implemented (Phase 6)" above. (An earlier draft of this document sketched a different, now-superseded shape here — e.g. `PUT .../software-requirements` — corrected to avoid contradicting the real, implemented endpoints.)
 
 ### `/api/cr-assignments`
 | Method | Path | Roles | Purpose | Key failure codes |
@@ -253,6 +256,6 @@ Example `GET .../requirements` response (BDA, as actually seeded and verified):
 
 ### Error Codes (canonical list — grows only per real implemented check)
 
-**Implemented today** (Phase 2/3/4/5/6): `VALIDATION_ERROR`, `BAD_REQUEST`, `RESOURCE_NOT_FOUND`, `INTERNAL_ERROR` (Phase 2, `GlobalExceptionHandler`); `INVALID_CREDENTIALS`, `UNAUTHORIZED`, `FORBIDDEN` (Phase 3); `PROGRAM_NOT_FOUND`, `STREAM_NOT_FOUND`, `ACADEMIC_YEAR_NOT_FOUND`, `ACADEMIC_TERM_NOT_FOUND`, `DIVISION_NOT_FOUND`, `BATCH_NOT_FOUND`, `SUBJECT_NOT_FOUND`, `FACULTY_NOT_FOUND`, `SUBJECT_FACULTY_ASSIGNMENT_NOT_FOUND`, `USER_NOT_FOUND`, `CR_ASSIGNMENT_NOT_FOUND`, `INVALID_ACADEMIC_RELATIONSHIP`, `AMBIGUOUS_FACULTY_ASSIGNMENT`, `DUPLICATE_ASSIGNMENT`, `FORBIDDEN_DIVISION_ACCESS` (Phase 4); `LAB_NOT_FOUND`, `LAB_TYPE_NOT_FOUND`, `SOFTWARE_NOT_FOUND`, `EQUIPMENT_NOT_FOUND`, `LAB_SOFTWARE_NOT_FOUND`, `LAB_EQUIPMENT_NOT_FOUND`, `LAB_UNAVAILABILITY_NOT_FOUND`, `LAB_SOFTWARE_ALREADY_ASSIGNED`, `LAB_EQUIPMENT_ALREADY_ASSIGNED`, `INVALID_UNAVAILABILITY_INTERVAL` (Phase 5); `SUBJECT_REQUIREMENT_NOT_FOUND`, `SOFTWARE_REQUIREMENT_ALREADY_EXISTS`, `EQUIPMENT_REQUIREMENT_ALREADY_EXISTS`, `INACTIVE_SOFTWARE`, `INACTIVE_EQUIPMENT`, `INACTIVE_LAB_TYPE`, `INVALID_LAB_TYPE_PREFERENCE` (Phase 6). Duplicate lab/lab-type/software/equipment *codes* deliberately reuse `VALIDATION_ERROR` rather than minting per-entity duplicate-code codes (e.g. no `DUPLICATE_LAB_CODE`), consistent with the Phase 4 precedent and PART 59's "keep the taxonomy manageable" instruction — a genuinely distinct *conflict* (an already-installed software/equipment combination, or an already-recorded requirement) gets its own code, following the `AMBIGUOUS_FACULTY_ASSIGNMENT`/`DUPLICATE_ASSIGNMENT` precedent, but a plain uniqueness violation on a create request does not need one.
+**Implemented today** (Phase 2/3/4/5/6/7): `VALIDATION_ERROR`, `BAD_REQUEST`, `RESOURCE_NOT_FOUND`, `INTERNAL_ERROR` (Phase 2, `GlobalExceptionHandler`); `INVALID_CREDENTIALS`, `UNAUTHORIZED`, `FORBIDDEN` (Phase 3); `PROGRAM_NOT_FOUND`, `STREAM_NOT_FOUND`, `ACADEMIC_YEAR_NOT_FOUND`, `ACADEMIC_TERM_NOT_FOUND`, `DIVISION_NOT_FOUND`, `BATCH_NOT_FOUND`, `SUBJECT_NOT_FOUND`, `FACULTY_NOT_FOUND`, `SUBJECT_FACULTY_ASSIGNMENT_NOT_FOUND`, `USER_NOT_FOUND`, `CR_ASSIGNMENT_NOT_FOUND`, `INVALID_ACADEMIC_RELATIONSHIP`, `AMBIGUOUS_FACULTY_ASSIGNMENT`, `DUPLICATE_ASSIGNMENT`, `FORBIDDEN_DIVISION_ACCESS` (Phase 4); `LAB_NOT_FOUND`, `LAB_TYPE_NOT_FOUND`, `SOFTWARE_NOT_FOUND`, `EQUIPMENT_NOT_FOUND`, `LAB_SOFTWARE_NOT_FOUND`, `LAB_EQUIPMENT_NOT_FOUND`, `LAB_UNAVAILABILITY_NOT_FOUND`, `LAB_SOFTWARE_ALREADY_ASSIGNED`, `LAB_EQUIPMENT_ALREADY_ASSIGNED`, `INVALID_UNAVAILABILITY_INTERVAL` (Phase 5); `SUBJECT_REQUIREMENT_NOT_FOUND`, `SOFTWARE_REQUIREMENT_ALREADY_EXISTS`, `EQUIPMENT_REQUIREMENT_ALREADY_EXISTS`, `INACTIVE_SOFTWARE`, `INACTIVE_EQUIPMENT`, `INACTIVE_LAB_TYPE`, `INVALID_LAB_TYPE_PREFERENCE` (Phase 6); `FACULTY_INACTIVE`, `INVALID_AVAILABILITY_INTERVAL`, `FACULTY_AVAILABILITY_OVERLAP`, `FACULTY_AVAILABILITY_NOT_FOUND` (Phase 7 — a CLOSED-term availability request deliberately reuses `VALIDATION_ERROR` rather than minting a dedicated code, same "keep the taxonomy manageable" reasoning as duplicate codes below). Duplicate lab/lab-type/software/equipment *codes* deliberately reuse `VALIDATION_ERROR` rather than minting per-entity duplicate-code codes (e.g. no `DUPLICATE_LAB_CODE`), consistent with the Phase 4 precedent and PART 59's "keep the taxonomy manageable" instruction — a genuinely distinct *conflict* (an already-installed software/equipment combination, an already-recorded requirement, or an overlapping availability window) gets its own code, following the `AMBIGUOUS_FACULTY_ASSIGNMENT`/`DUPLICATE_ASSIGNMENT` precedent, but a plain uniqueness violation on a create request does not need one.
 
 **Planned** (scheduling engine, Phase 9+ — not yet implemented, each maps 1:1 to a hard constraint in [06-CONSTRAINTS.md](06-CONSTRAINTS.md)): `LAB_CONFLICT`, `FACULTY_CONFLICT`, `FACULTY_UNAVAILABLE`, `BATCH_CONFLICT`, `DIVISION_CONFLICT`, `CAPACITY_VIOLATION`, `SOFTWARE_MISMATCH`, `EQUIPMENT_MISMATCH`, `LAB_TYPE_MISMATCH`, `LAB_UNAVAILABLE`, `FORBIDDEN_DIVISION_ACCESS`, `INVALID_ACADEMIC_RELATIONSHIP`, `NO_VALID_ALLOCATION`, `INVALID_STATE_TRANSITION`.

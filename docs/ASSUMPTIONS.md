@@ -72,10 +72,11 @@ This file records engineering assumptions made when requirements are ambiguous o
 **Reason:** No cross-system/offline-generation requirement exists that would need UUIDs; `BIGINT` keeps indexes smaller and joins cheaper for a single-database modular monolith, and is simpler to reason about in demo/viva walkthroughs.
 **Impact:** Reversible per-table if a specific entity later needs client-generated IDs (unlikely for this domain).
 
-### A-15: Faculty availability is optionally term-scoped, not mandatorily
+### A-15: [SUPERSEDED in Phase 7 — see A-32] Faculty availability is optionally term-scoped, not mandatorily
 **Assumption:** `faculty_availability.academic_term_id` is nullable; a null value means "applies every term."
 **Reason:** Matches how availability is actually communicated by faculty (recurring weekly pattern) without forcing re-entry every term for the common case; term-scoped overrides remain possible when needed.
 **Impact:** Scheduling context queries must handle both scoped and unscoped rows (`term_id = :term OR term_id IS NULL`) — documented so this isn't missed when the repository query is implemented in Phase 7.
+**Superseded:** Phase 7 implemented `academic_term_id` as mandatory instead, per the phase brief's explicit recommendation — see A-32 below and ADR-031 in [15-DESIGN-DECISIONS.md](15-DESIGN-DECISIONS.md). This entry is kept, not deleted, per this project's standing practice of recording changed decisions rather than erasing them.
 
 ### A-16: Lab unavailability is date-level, not datetime-level
 **Assumption:** `lab_unavailability` uses `start_date`/`end_date` (whole days), not `start_datetime`/`end_datetime`.
@@ -162,5 +163,20 @@ See ADR-022 in [15-DESIGN-DECISIONS.md](15-DESIGN-DECISIONS.md) for the full rea
 **Assumption:** Requirements match `Software`/`Equipment` by identity (FK) only; `LabSoftware.installedVersion` (Phase 5) is stored but never compared against a requirement-side version constraint in Phase 6.
 **Reason:** See ADR-030 — no seeded or real scenario in this project's scope needs version-level discrimination, and a version-comparison concept would be speculative with no consumer.
 **Impact:** A future phase needing "lab has Cloudera >= 6.3"-style matching will require a new column/comparison operator on the requirement row — a real, acknowledged gap.
+
+### A-32: Faculty availability term-scoping made mandatory, superseding A-15
+**Assumption:** `faculty_availability.academic_term_id` is `NOT NULL` — every availability row belongs to exactly one term; there is no "applies every term" row.
+**Reason:** See ADR-031 — a faculty's real availability genuinely changes semester to semester, and this now matches how every other term-relative fact in this project (`SubjectFacultyAssignment`, `CrAssignment`) is already modeled.
+**Impact:** A Lab Assistant must re-enter (or a future UI must offer to copy) availability for each new term — a real, accepted data-entry cost, documented in ADR-031's trade-offs.
+
+### A-33: Faculty availability overlap prevention is application-only, no PostgreSQL exclusion constraint
+**Assumption:** Overlapping active `faculty_availability` rows for the same faculty/term/day are rejected by `FacultyAvailabilityService` at write time; no `EXCLUDE USING gist` constraint or generated range column exists in the schema.
+**Reason:** See ADR-032 — PostgreSQL has no native recurring-weekly range type, and availability data is low-volume/administratively mutated, so the added complexity of a generated-range + exclusion constraint was judged not worth it at this scale.
+**Impact:** Under hypothetical high-concurrency writes to the same faculty/term/day, a TOCTOU race exists that a database-level exclusion constraint would close — accepted as a non-issue at this project's actual mutation pattern, noted rather than silently assumed safe.
+
+### A-34: Faculty availability read access restricted to LAB_ASSISTANT, narrower than Phase 5/6's open-read pattern
+**Assumption:** `GET /api/faculty/{id}/availability*` requires `LAB_ASSISTANT`, unlike Labs (Phase 5) and Subject Requirements (Phase 6) where any authenticated role can read.
+**Reason:** See ADR-034 — raw availability management data has no demonstrated CR/STUDENT consumer yet; the future constraint engine will consume it internally via `FacultyAvailabilityService`, not through this REST surface.
+**Impact:** If a future phase needs CR-visible availability (e.g. explaining a failed extra-lab request), this is a straightforward, backward-compatible loosening of `@PreAuthorize` — not a breaking change, but not yet built on a guess either.
 
 *New assumptions will be appended here as they arise in later phases, each with Reason and Impact noted.*

@@ -455,3 +455,55 @@ BDA's requirements (`Cloudera`, preferred `DATA_ENGINEERING`, no required type) 
 ### Deviations from the Phase 1 plan
 
 None of substance — the required-vs-preferred lab-type distinction, subject-level (not per-term) requirement scope, and ALL-required software/equipment semantics all match what Phase 1's design already anticipated.
+
+## 15. Phase 7 — Faculty Availability (implemented)
+
+### Availability management + evaluation flow
+
+```mermaid
+flowchart TD
+    Controller[FacultyAvailabilityController] --> Preauth["@PreAuthorize hasRole LAB_ASSISTANT (read AND write)"]
+    Preauth --> Service[FacultyAvailabilityService]
+    Service --> Validate["Validation: faculty active, term not CLOSED, start<end, no overlap with active rows"]
+    Validate --> Repo[FacultyAvailabilityRepository]
+    Repo --> DB[(PostgreSQL)]
+    Service -->|isAvailable / check| Eval["Evaluation: merge adjacent active rows in memory, test containment via TimeIntervalUtils"]
+```
+
+### Faculty Availability vs. Faculty Conflict — two layers, never confused (PART 41 of the phase brief)
+
+```mermaid
+flowchart LR
+    subgraph Layer 1 - Availability - Phase 7 implemented
+        FA["Faculty X available Mon 09:00-12:00"]
+    end
+    subgraph Layer 2 - Conflict - Phase 9+ not yet implemented
+        FC["Faculty X already booked A1 09:00-11:00 -> A2 09:00-11:00 request fails HC-02, not HC-03"]
+    end
+    FA -->|"HC-03 - is the slot within declared availability at all?"| Decision["Both layers must independently pass for a session to be schedulable"]
+    FC -->|"HC-02 - is the faculty already occupied by a real booking?"| Decision
+```
+
+A faculty can be generally *available* (HC-03) at a time they are already *booked* (HC-02) — availability is a static weekly boundary the faculty declares in advance; conflict depends on real allocation data that doesn't exist until Phase 9+. Phase 7 only implements the availability layer's data and evaluation logic.
+
+### New backend additions (Phase 7)
+
+```
+com.college.laballocation.common/    + TimeIntervalUtils (isValid/overlaps/contains, half-open [start,end)
+                                        semantics reused by faculty availability now, future constraints later)
+com.college.laballocation.faculty/   + FacultyAvailability (entity), FacultyAvailabilityRepository,
+                                        FacultyAvailabilityService, FacultyAvailabilityController,
+                                        FacultyAvailabilityDtos, DevFacultyAvailabilitySeeder (@Profile("dev"))
+```
+
+### Access model — deliberately narrower than Phase 5/6 (PART 22 of the phase brief)
+
+Unlike Labs/Subjects (Phase 5/6), where `GET` is open to any authenticated role, `/api/faculty/{id}/availability*` restricts **both** read and write to `LAB_ASSISTANT`. Raw faculty-availability management data has no legitimate CR/STUDENT consumer yet — the future constraint engine (Phase 9+) will call `FacultyAvailabilityService` internally, not through this REST surface, so there is no student- or CR-facing use case this phase needs to support. See docs/09-AUTHORIZATION-RBAC.md's Permission Matrix (updated this phase) and ADR-034.
+
+### Verified end-to-end (Dockerized, 2026-08-22)
+
+All 8 of the phase brief's required scenarios (A-H: LAB_ASSISTANT creates valid availability, CR/STUDENT mutation both 403, unauthenticated read 401, overlapping create rejected `409 FACULTY_AVAILABILITY_OVERLAP`, adjacent create allowed, BDA-Monday-09:00-11:00 check returns available, BDA-Monday-13:00-14:00 check returns unavailable) executed with real `curl` requests against the running containers; PATCH and DELETE (soft-deactivate) verified directly; a restart-and-recount idempotency check confirmed the seeded+test-created row count (7) was unchanged across a backend container restart; Phase 4-6 regression endpoints (`/api/auth/me`, `/api/cr-assignments/me`, Cloudera lab filter, BDA subject requirements) re-verified working with no regression.
+
+### Deviations from the Phase 1 plan
+
+**`academic_term_id` made mandatory**, not nullable — the Phase 1 draft's "applies every term" design (docs/ASSUMPTIONS.md A-15) is superseded per the Phase 7 brief's explicit recommendation; see ADR-031. Read access restricted to `LAB_ASSISTANT` only (see above) is also a deliberate narrowing versus the open-read pattern of Phase 5/6, not an oversight — documented, not silent.
