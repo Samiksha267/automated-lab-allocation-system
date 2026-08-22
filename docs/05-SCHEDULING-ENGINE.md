@@ -1,6 +1,19 @@
 # Scheduling Engine
 
-**Status (Phase 7):** `SchedulingContext`'s "faculty availability rows" input (line item in the Domain Objects table below) is no longer a placeholder — `faculty_availability` (mandatory term-scoped, half-open interval) and `FacultyAvailabilityService.isAvailable(...)` (docs/04-DATABASE-DESIGN.md §6, docs/06-CONSTRAINTS.md HC-03) are both real and independently verified. No `SchedulingConstraint`/`FacultyAvailabilityConstraint` code exists yet — this remains a design document for the engine itself until Phase 9.
+**Status (Phase 8):** The persisted half of this document's world now exists — `Allocation`/`ScheduleVersion` (docs/04-DATABASE-DESIGN.md §7) — and every transient domain object in the table below (`SchedulingRequest`, `SchedulingContext`, `CandidateAllocation`, `ConstraintResult`, `ConstraintViolation`) is implemented as a real, tested Java type in `com.college.laballocation.scheduling`, decoupled from JPA/HTTP exactly as NFR-08 requires. **No constraint evaluation, candidate generation, scoring, or backtracking exists yet** — Phase 8 only establishes what a request/candidate/allocation *is*; Phase 9 establishes whether a candidate is *valid* (docs/03-SYSTEM-ARCHITECTURE.md §16). `AllocationDecision`, `ScoreBreakdown`, `AlternativeAllocation`, and `SchedulingMetrics` remain design-only, deliberately deferred to the phases that actually need them (Phase 11-13) rather than built now as empty scaffolding.
+
+## Persisted State vs. Transient Domain Objects (Phase 8)
+
+This project's scheduling model has two genuinely different kinds of object, and Phase 8 is the phase that made the distinction concrete rather than just conceptual:
+
+| | Persisted (JPA entity) | Transient (plain Java record/class, never an entity) |
+|---|---|---|
+| **What it represents** | A fact that happened (or was formally decided) | A possibility being considered, evaluated once and then discarded |
+| **Examples** | `ScheduleVersion`, `Allocation` | `SchedulingRequest`, `SchedulingContext`, `CandidateAllocation`, `ConstraintResult`, `ConstraintViolation` |
+| **Lifecycle** | Survives across requests, versioned, auditable | Exists only for the duration of one scheduling evaluation |
+| **Why the split matters** | Every persisted row must satisfy real invariants (CHECK constraints, FKs) since it's permanent | Most candidates evaluated during a scheduling run are rejected — persisting them would be pure waste, and would blur "this was actually booked" with "this was considered and rejected" |
+
+`CandidateAllocation` in particular is deliberately never a JPA entity (PART 22 of the Phase 8 brief, ADR-038) — it is the direct transient counterpart of `Allocation`, evaluated by the future Phase 9 constraint engine and discarded the moment a decision is made, whether or not it wins.
 
 ## Faculty Availability → Future Constraint Validation (Phase 7 data, Phase 9 constraint)
 
@@ -26,19 +39,22 @@ This is a **Constraint Satisfaction Problem (CSP)** for single-session validatio
 
 ## Domain Objects (decoupled from JPA/HTTP — NFR-08)
 
-| Object | Role |
-|---|---|
-| `SchedulingRequest` | Immutable input: subject, targetType, divisionId, batchId?, requested date/time (or a flexible window for auto-generation) |
-| `SchedulingContext` | Everything needed to evaluate: existing active allocations in the relevant window, faculty availability rows, lab inventory + software/equipment, subject requirements — loaded once per scheduling run, passed by reference to avoid repeated queries |
-| `CandidateAllocation` | One (lab, faculty, time) combination under evaluation; never persisted directly |
-| `ConstraintResult` | Pass/fail + `ConstraintViolation?` from one `SchedulingConstraint` |
-| `ConstraintViolation` | `errorCode`, `message`, `details` — maps directly to the API error model |
-| `ScoreBreakdown` | Per-factor scores + total, from the scoring engine |
-| `AllocationDecision` | Final outcome: selected candidate + full explanation, or failure + alternatives |
-| `AlternativeAllocation` | A ranked fallback suggestion when the originally requested slot fails |
-| `SchedulingMetrics` | Counters: candidates evaluated, constraints checked, backtrack count, execution time — for [16-PERFORMANCE-BENCHMARKS.md](16-PERFORMANCE-BENCHMARKS.md) |
+| Object | Status | Role |
+|---|---|---|
+| `SchedulingRequest` | **Implemented (Phase 8)** | Immutable record: `allocationType`, `targetType`, `divisionId`, `batchId?`, `subjectId`, **`facultyId` already resolved** (see below), `academicTermId`, `allocationDate`, `startTime`, `endTime`. Self-validates the target/batch structural invariant and the time interval in its compact constructor — no Spring, no database. |
+| `SchedulingContext` | **Implemented (Phase 8)** | Everything needed to evaluate a request that does **not** vary per candidate lab: resolved subject/faculty/division/batch identity snapshots, plus existing active allocations for the faculty/batch/division on the requested date (candidate-independent — HC-02/04/05's inputs). Deliberately excludes lab-specific data (existing lab allocations, lab unavailability) since that varies per candidate and is queried once per candidate instead (HC-01/06) — see docs/03-SYSTEM-ARCHITECTURE.md §16. Assembled by `SchedulingContextFactory` from existing Phase 4/5 services + this phase's `AllocationQueryService`; the class itself performs no queries. |
+| `CandidateAllocation` | **Implemented (Phase 8), shape only** | One `(SchedulingContext, labId)` combination under evaluation - never persisted, never scored, never generated by this phase (candidate generation is Phase 10). |
+| `ConstraintResult` | **Implemented (Phase 8), shape only** | `(HardConstraintId, passed, ConstraintViolation?)` from one future `SchedulingConstraint` (Phase 9) - self-validates that a passing result carries no violation and a failing one always does. |
+| `ConstraintViolation` | **Implemented (Phase 8)** | `errorCode`, `message`, `affectedResourceType`, `affectedResourceId`, `details` — maps directly to the API error model, deliberately not an untyped `Map`-only shape. |
+| `HardConstraintId` | **Implemented (Phase 8)** | Stable enum (`HC_01_LAB_CONFLICT` .. `HC_12_ACADEMIC_RELATIONSHIP`) identifying *which* constraint produced a `ConstraintResult` — kept separate from the wire-level API error codes in `ConstraintViolation`. |
+| `ScoreBreakdown` | Not yet implemented | Per-factor scores + total, from the scoring engine — Phase 11. |
+| `AllocationDecision` | Not yet implemented, deliberately deferred | Final outcome: selected candidate + full explanation, or failure + alternatives. Considered for Phase 8 and deferred (ADR discussion, docs/15-DESIGN-DECISIONS.md) — its real shape depends on scoring (Phase 11) and alternatives (Phase 13), neither of which exist yet; building it now would be speculative scaffolding rather than a tested contract. Phase 12 (Explainable Allocation) is where it belongs. |
+| `AlternativeAllocation` | Not yet implemented | A ranked fallback suggestion when the originally requested slot fails — Phase 13. |
+| `SchedulingMetrics` | Not yet implemented | Counters: candidates evaluated, constraints checked, backtrack count, execution time — for [16-PERFORMANCE-BENCHMARKS.md](16-PERFORMANCE-BENCHMARKS.md), Phase 14/25. |
 
-`constraint`, `scoring`, `conflict`, and the core scheduler operate **only** on these objects — never on JPA entities or DTOs directly. Application services in `allocation`/`schedule` are the translation boundary (load entities → build `SchedulingContext` → run engine → persist `AllocationDecision`).
+`constraint`, `scoring`, `conflict`, and the core scheduler will operate **only** on these objects — never on JPA entities or DTOs directly (verified now: none of `SchedulingRequest`/`SchedulingContext`/`CandidateAllocation`/`ConstraintResult`/`ConstraintViolation` carries a single JPA annotation). Application services in the `scheduling` package are the translation boundary (load entities → build `SchedulingContext` via `SchedulingContextFactory` → Phase 9+ will run the engine → Phase 15/19 will persist an `Allocation`).
+
+**Faculty resolution happens before a `SchedulingRequest` exists (PART 15 of the Phase 8 brief):** `facultyId` is never resolved *by* the request — the preferred architecture is `external scheduling input → resolve academic/faculty context (FacultyAssignmentResolutionService, Phase 4) → SchedulingRequest`, so the future constraint engine always receives an unambiguous request and never itself has to decide "which faculty teaches this."
 
 ## Single-Request Validation Pipeline (used by both extra-lab booking and PDF-import validation)
 

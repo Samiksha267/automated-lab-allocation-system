@@ -91,7 +91,7 @@ Key modeling decision: `ALLOCATION.target_type` is an explicit `DIVISION | BATCH
 - **ScoreBreakdown** — per-scorer contributions plus total, for a valid candidate.
 - **AllocationDecision** — the final selected candidate plus full explanation (constraints passed, score breakdown, rejected alternatives with reasons).
 
-Full detail in [05-SCHEDULING-ENGINE.md](05-SCHEDULING-ENGINE.md) (Phase 8).
+Full detail in [05-SCHEDULING-ENGINE.md](05-SCHEDULING-ENGINE.md). **Roadmap correction (Phase 8):** this Phase-1-era paragraph originally tagged the whole scheduling-engine document "(Phase 8)" without distinguishing the persisted schema from the algorithm — a label never revisited across Phases 4–7, which is exactly the inconsistency Phase 8 corrects. The finalized numbering (§16 below) is: Phase 8 builds the `Allocation`/`ScheduleVersion` persistence layer and these domain objects' *shapes*; Phase 9 is the Constraint Engine that evaluates them; Phase 10 onward is candidate generation, scoring, explainability, alternatives, and backtracking, in that order.
 
 ## 5. Allocation Lifecycle — Two Separate State Machines, Deliberately Not One
 
@@ -507,3 +507,67 @@ All 8 of the phase brief's required scenarios (A-H: LAB_ASSISTANT creates valid 
 ### Deviations from the Phase 1 plan
 
 **`academic_term_id` made mandatory**, not nullable — the Phase 1 draft's "applies every term" design (docs/ASSUMPTIONS.md A-15) is superseded per the Phase 7 brief's explicit recommendation; see ADR-031. Read access restricted to `LAB_ASSISTANT` only (see above) is also a deliberate narrowing versus the open-read pattern of Phase 5/6, not an oversight — documented, not silent.
+
+## 16. Phase 8 — Scheduling Domain & Allocation Persistence Foundation (implemented)
+
+### Roadmap correction — finalized Phase 8–16 sequence
+
+The single stale "(Phase 8)" tag on §4 above (pointing at the whole Scheduling Engine document, unrevised since Phase 1) is superseded by this explicit sequence, confirmed against the project's original phase brief:
+
+| Phase | Scope |
+|---|---|
+| **8** | **Scheduling Domain & Allocation Persistence Foundation** (this phase) — `Allocation`/`ScheduleVersion` tables, the pure `SchedulingRequest`/`SchedulingContext`/`CandidateAllocation`/`ConstraintResult`/`ConstraintViolation` object shapes, and the repository/query infrastructure Phase 9 needs. No constraint evaluation. |
+| 9 | Constraint Engine — the actual `SchedulingConstraint` classes (HC-01..HC-12) that read this phase's persisted data and evaluate a candidate. |
+| 10 | Candidate Generation — querying/filtering labs into a candidate list for a request. |
+| 11 | Scoring Engine — ranking valid candidates (docs/07-ALLOCATION-SCORING.md). |
+| 12 | Explainable Allocation — `AllocationDecision`, the final selected-candidate-plus-explanation result type (deliberately deferred past Phase 8, see §17.7 below). |
+| 13 | Conflict Detection + Alternatives — ranked fallback suggestions when a request fails. |
+| 14 | Automatic Scheduling / Backtracking — most-constrained-first multi-session generation. |
+| 15 | Extra Lab Scheduling — the CR-facing FCFS booking flow that finally creates real `Allocation` rows in production. |
+| 16 | FCFS / Concurrency — finalizes ADR-010's provisional concurrency mechanism. |
+
+This is a documentation correction, not a change to any business requirement — every FR/HC this project has already documented (docs/02-REQUIREMENTS.md, docs/06-CONSTRAINTS.md) is unaffected; only the phase *numbering* for not-yet-built algorithm work is being made internally consistent (11-TESTING-STRATEGY.md's "Algorithm Test Coverage" section header is corrected to match, see that document).
+
+### Persisted state vs. transient algorithm objects
+
+```mermaid
+flowchart TD
+    subgraph Persisted - Phase 8 implemented
+        SV[ScheduleVersion] --> AL[Allocation]
+    end
+    subgraph Transient domain objects - Phase 8 shapes only, Phase 9+ populates/evaluates them
+        SR[SchedulingRequest] --> SC[SchedulingContext]
+        SC --> CA[CandidateAllocation]
+    end
+    AL -.->|"read by SchedulingContextFactory"| SC
+    CA -.->|"evaluated by"| CE["Phase 9 Constraint Engine - NOT YET IMPLEMENTED"]
+    CE -.-> CR[ConstraintResult / ConstraintViolation]
+```
+
+`ScheduleVersion`/`Allocation` are real, migrated JPA entities (`V10__create_schedule_version_and_allocation.sql`). `SchedulingRequest`, `SchedulingContext`, `CandidateAllocation`, `ConstraintResult`, `ConstraintViolation` are plain Java records with no JPA annotations at all (NFR-08) — see docs/05-SCHEDULING-ENGINE.md for the full per-object contract Phase 9 will implement against.
+
+### New backend additions (Phase 8)
+
+```
+com.college.laballocation.scheduling/  + AllocationType, TargetType, AllocationStatus, ScheduleVersionStatus (enums)
+                                          ScheduleVersion (entity), ScheduleVersionRepository, ScheduleVersionService
+                                          Allocation (entity, static forBatch/forDivision factories), AllocationRepository,
+                                          AllocationQueryService (read-only, no creation methods)
+                                          SchedulingTimeMapper, InstantRange (LocalDate/LocalTime <-> Instant bridge)
+                                          SchedulingRequest, SchedulingContext, SchedulingRefs, CandidateAllocation,
+                                          ConstraintResult, ConstraintViolation, HardConstraintId (pure domain objects)
+                                          SchedulingContextFactory (assembles a context from existing Phase 4/5 services)
+                                          DevScheduleVersionSeeder (@Profile("dev") - seeds ScheduleVersion only, no Allocation rows)
+```
+
+### No production Allocation-creation API (deliberate, PART 31 of the phase brief)
+
+Neither `POST /api/allocations` nor any `AllocationController` exists. A raw `Allocation` row must never bypass the constraint engine that doesn't exist until Phase 9 — verified live: `POST /api/allocations` and `GET /api/allocations` both return `404` against the running stack, confirming no such surface was accidentally exposed. `Allocation` rows in this phase are only ever created via direct repository calls from tests and the dev seeder — never through a REST boundary.
+
+### Verified end-to-end (Dockerized, 2026-08-22)
+
+Flyway migrated to v10 cleanly; `DevScheduleVersionSeeder` created one `PUBLISHED` `ScheduleVersion` (term "Semester 5 (2026-27)", version 1) with zero `Allocation` rows, confirmed via direct `psql` query. Five DB-level guarantees proven with real, transactional `psql` inserts against the live container: (1) a valid DIVISION-targeted allocation insert succeeds; (2) a BATCH-targeted insert with a null `batch_id` is rejected by `chk_allocation_target_invariant`; (3) `end_time <= start_time` is rejected by `chk_allocation_interval`; (4) a duplicate `(academic_term_id, version_number)` is rejected by `uq_schedule_version_term_number`; (5) a second `PUBLISHED` version for the same term is rejected by `uq_schedule_version_one_published_per_term`. A restart-and-recount idempotency check confirmed the seeded `schedule_version` row count (1) was unchanged across a backend container restart. Phase 3-7 regression endpoints (`/api/auth/me`, `/api/cr-assignments/me`, Cloudera lab filter, BDA subject requirements, faculty availability) all re-verified working with no regression.
+
+### Deviations from the Phase 1 plan
+
+None of substance to the schema itself — `Allocation`/`ScheduleVersion`'s fields, invariants, and lifecycle match what docs/04-DATABASE-DESIGN.md §7 and ADR-005/ADR-009 already specified. The one real addition beyond the Phase 1 draft is the college-timezone bridge (`SchedulingTimeMapper`, `app.college.time-zone`) — the Phase 1 plan never anticipated the `LocalDate`/`LocalTime` (Allocation) vs. `TIMESTAMPTZ`/`Instant` (LabUnavailability, Phase 5) type boundary that HC-06 will need to cross in Phase 9; resolving it now (rather than leaving every future constraint to solve it independently) is a deliberate, documented addition — see ADR-037.

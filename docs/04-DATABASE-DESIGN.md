@@ -211,16 +211,19 @@ Real association entities `(subject_id, software_id)` / `(subject_id, equipment_
 
 ---
 
-## 7. Scheduling Core: Term, Version, Allocation
+## 7. Scheduling Core: Term, Version, Allocation — **implemented (Phase 8)**
 
-### `academic_term`
-**Key fields:** `id`, `name` (e.g. "2026 Odd Semester"), `start_date`, `end_date`, `active`.
+### `academic_term` — **implemented (Phase 4)**
+**Key fields:** `id`, `academic_year_label`, `term_number`, `display_name`, `start_date`, `end_date`, `status`. See §2 above.
 
-### `schedule_version`
-**Key fields:** `id`, `academic_term_id`, `version_number`, `status` (`DRAFT`|`PUBLISHED`|`SUPERSEDED`), `reason` (why this version was created — required for v2+), `created_by`, `created_at`, `published_at`.
-**Rule:** exactly one `PUBLISHED` version per `academic_term` at a time; publishing a new version sets the previous `PUBLISHED` version's status to `SUPERSEDED` (never deletes it) — this is what makes students only ever see the current version while history is fully preserved (PART 41).
+### `schedule_version` (Flyway `V10__create_schedule_version_and_allocation.sql`)
+**Actual columns:** `id`, `academic_term_id` (FK, `NOT NULL`), `version_number` (`INT NOT NULL`, `CHECK > 0`), `status` (`DRAFT`|`PUBLISHED`|`SUPERSEDED`), `reason` (nullable — required for v2+ by application validation, `ScheduleVersionService.createDraft`, not a database rule, since a version's first release genuinely needs no justification), `created_by`/`created_at`, `published_by`/`published_at` (both nullable until published).
+**Rule — at most one `PUBLISHED` version per term:** enforced two ways, not just documented as a convention (defense in depth, this project's standing pattern): `ScheduleVersionService.publish()` actively transitions the term's previous `PUBLISHED` version to `SUPERSEDED` in the same call, **and** a partial unique index (`uq_schedule_version_one_published_per_term ON schedule_version (academic_term_id) WHERE status = 'PUBLISHED'`) makes the invalid state structurally impossible even if application code ever had a bug — verified directly: a second `PUBLISHED` row for the same term was rejected by Postgres in a live transactional test (docs/11-TESTING-STRATEGY.md).
+**Uniqueness:** `(academic_term_id, version_number)` — `uq_schedule_version_term_number`.
+**Lifecycle — strictly forward, never backward:** `DRAFT → PUBLISHED → SUPERSEDED`; `SUPERSEDED → DRAFT` is never allowed (a superseded version is permanent history) — enforced by `ScheduleVersion.publish()`/`.supersede()`'s transition guards (`INVALID_SCHEDULE_VERSION_TRANSITION`, 409).
+**No end-user API in this phase** (PART 33 of the Phase 8 brief) — `ScheduleVersionService` exists and is exercised by tests and the dev seeder only; a management API arrives with Phase 18 (schedule-version history UI) / Phase 19 (PDF import approval).
 
-### `allocation` — the central entity
+### `allocation` — the central entity (Flyway `V10__create_schedule_version_and_allocation.sql`)
 
 | Field | Type | Notes |
 |---|---|---|
@@ -232,31 +235,40 @@ Real association entities `(subject_id, software_id)` / `(subject_id, equipment_
 | `subject_id` | FK → subject | |
 | `faculty_id` | FK → faculty | |
 | `lab_id` | FK → lab | |
-| `date` | DATE | |
-| `start_time`, `end_time` | TIME | half-open interval `[start_time, end_time)`, see §Scheduling Semantics |
-| `status` | `APPROVED` \| `PUBLISHED` \| `CANCELLED` | Deliberately small — see [03-SYSTEM-ARCHITECTURE.md §5](03-SYSTEM-ARCHITECTURE.md) for why `DRAFT`/`PENDING_REVIEW`/`CONFLICT`/`REJECTED` were removed from `Allocation` and live only on `TimetableImportEntry`/`TimetableImport` instead — an `Allocation` row is only ever created once it's already known valid |
+| `allocation_date` | DATE | a session is always within a single local college day — no overnight sessions |
+| `start_time`, `end_time` | TIME | half-open interval `[start_time, end_time)`, same convention as everywhere else in this project |
+| `status` | `APPROVED` \| `PUBLISHED` \| `CANCELLED` | Deliberately small — see [03-SYSTEM-ARCHITECTURE.md §5](03-SYSTEM-ARCHITECTURE.md) for why `DRAFT`/`PENDING_REVIEW`/`CONFLICT`/`REJECTED` were removed from `Allocation` and live only on `TimetableImportEntry`/`TimetableImport` instead — an `Allocation` row is only ever created once it's already known valid. `AllocationStatus.blocksScheduling()` (`APPROVED`/`PUBLISHED` → `true`, `CANCELLED` → `false`) is the single, centralized definition of "active" every repository query uses — no query independently invents its own active-status list. |
 | `schedule_version_id` | FK, **not null** | see rule below — every `Allocation` is stamped with a version at creation time |
 | `created_by`, `created_at` | | |
-| `approved_by`, `approved_at` | nullable | REGULAR only — the Lab Assistant who approved the source import |
-| `cancelled_by`, `cancelled_at`, `cancellation_reason` | nullable | set only on cancellation |
+| `approved_by`, `approved_at` | nullable | REGULAR only — the Lab Assistant who approved the source import; unpopulated until Phase 19 builds the approval flow that sets it |
+| `cancelled_by`, `cancelled_at`, `cancellation_reason` | nullable | set only on cancellation, via `Allocation.cancel()` |
 
-**`schedule_version_id` rule:** a `REGULAR` allocation is created against the term's current `DRAFT` `schedule_version` and becomes visible (`status → PUBLISHED`) only when the Lab Assistant explicitly publishes that version. An `EXTRA` allocation is created **directly against the term's currently *published* version** and is immediately stamped `status = PUBLISHED` in the same transaction — it does not wait for the next official version cut (this resolves ASSUMPTIONS A-11: extra labs overlay the live published version as soon as they're validly booked, since waiting would defeat the point of fast makeup-lab scheduling). `schedule_version_id` is therefore never null on any persisted `Allocation` row.
+**No separate `academic_term_id` column** — deliberately, since the term is always derivable via `allocation.getScheduleVersion().getAcademicTerm()`; a redundant FK here could theoretically disagree with the version it's attached to, for no integrity or query benefit large enough to justify carrying it (same "don't duplicate a derivable FK" principle already applied to `division`/`batch` not repeating `program_id`/`stream_id`, §2 above).
+
+**`schedule_version_id` rule:** a `REGULAR` allocation is created against the term's current `DRAFT` `schedule_version` and becomes visible (`status → PUBLISHED`) only when the Lab Assistant explicitly publishes that version. An `EXTRA` allocation is created **directly against the term's currently *published* version** and is immediately stamped `status = PUBLISHED` in the same transaction — it does not wait for the next official version cut (this resolves ASSUMPTIONS A-11: extra labs overlay the live published version as soon as they're validly booked, since waiting would defeat the point of fast makeup-lab scheduling). `schedule_version_id` is therefore never null on any persisted `Allocation` row. **Not implemented yet:** the actual creation flow that decides which version to attach to (Phase 15/19) — Phase 8 only makes `schedule_version_id NOT NULL` and ready to receive it.
 
 **Invariants:**
 1. `target_type = BATCH → batch_id IS NOT NULL AND batch.division_id = allocation.division_id`
 2. `target_type = DIVISION → batch_id IS NULL`
 
-**Enforcement — decision: both application validation AND a database CHECK constraint.**
-- **Application validation** runs first (Bean Validation / service-layer check) so the API can return a clean, typed `400` with a specific error code (e.g. `INVALID_TARGET_TYPE`) rather than a raw database error leaking to the client.
-- **Database CHECK constraint** (`CHECK ((target_type = 'DIVISION' AND batch_id IS NULL) OR (target_type = 'BATCH' AND batch_id IS NOT NULL))`) is added as a second, non-bypassable line of defense — any future code path (a batch script, a bug in a new service, a manual migration) that tries to insert an inconsistent row is rejected by Postgres itself. This mirrors the project's general principle (see HC design, CR ownership) that important invariants should never rely solely on application code being correct.
-- The `batch.division_id = allocation.division_id` cross-table consistency check cannot be a simple CHECK constraint (Postgres CHECK constraints can't query another table); it is enforced in application validation and covered by an integration test, with a documented residual risk noted in ASSUMPTIONS.
+**Enforcement — decision: both application validation AND a database CHECK constraint (implemented as designed, with one correction from the Phase 1 draft).**
+- **Application validation** is enforced by `Allocation`'s two static factory methods, `forBatch(...)`/`forDivision(...)` — the *only* way to construct an instance, specifically so the invariant can never be bypassed by construction. This corrects the Phase 1 draft's assumption of "Bean Validation / service-layer check" — there is no `AllocationService.create()` yet for Bean Validation to attach to (Phase 8 deliberately has no creation API, PART 31), so the guarantee lives on the entity itself instead, ready for whichever service calls it in Phase 15/19.
+- **Database CHECK constraint** (`chk_allocation_target_invariant`) is the second, non-bypassable line of defense — verified directly: a `BATCH`-typed row with a null `batch_id` was rejected by Postgres in a live transactional test.
+- The `batch.division_id = allocation.division_id` cross-table consistency check cannot be a simple CHECK constraint (Postgres CHECK constraints can't query another table); `Allocation.forBatch` enforces it by comparing the already-loaded `Batch.getDivision().getId()` against the target division — no extra query needed, since the caller must supply a loaded `Batch` entity, not a bare id.
 
-**Indexes (critical for constraint-checking performance):**
-- `(lab_id, date)` — every HC-01/HC-06 check filters by lab+date before comparing time ranges.
-- `(faculty_id, date)` — HC-02/HC-03.
-- `(batch_id, date)` — HC-04.
-- `(division_id, date)` — HC-05.
-- All four are partial indexes `WHERE status IN ('APPROVED','PUBLISHED')` since only active allocations occupy resources (see Allocation Lifecycle) — this keeps the hot conflict-checking indexes small and fast even as cancelled/rejected history accumulates.
+**Indexes (critical for future constraint-checking performance, Phase 9):**
+- `(lab_id, allocation_date)` — HC-01/HC-06.
+- `(faculty_id, allocation_date)` — HC-02/HC-03.
+- `(batch_id, allocation_date)` — HC-04.
+- `(division_id, allocation_date)` — HC-05 (returns both `DIVISION`-wide and `BATCH` rows for that division, with no join, since `division_id` is always set regardless of `target_type` — see `AllocationRepository` javadoc).
+- All four are partial indexes `WHERE status IN ('APPROVED', 'PUBLISHED')` since only active allocations occupy resources — this keeps the hot conflict-checking indexes small and fast even as cancelled/rejected history accumulates.
+- `(schedule_version_id)`, `(status)`, `(subject_id)` — general-purpose lookups (e.g. "all allocations in this version," "all cancelled allocations"), not on the per-candidate hot path.
+
+**Concurrency — explicitly deferred, not solved here (ADR-010, Phase 16):** no PostgreSQL exclusion constraint exists yet over `(lab_id, allocation_date, time-range)` — Phase 8 only adds the lookup indexes above; the final FCFS-safe concurrency mechanism (row locking vs. an exclusion constraint via `btree_gist`) remains Phase 16's decision, backed by the concurrent-request integration test in docs/11-TESTING-STRATEGY.md.
+
+### The `LocalDate`/`LocalTime` ↔ `Instant` bridge (`SchedulingTimeMapper`)
+
+`allocation.allocation_date`/`start_time`/`end_time` are `DATE`/`TIME` (`LocalDate`/`LocalTime`) — matching `faculty_availability`'s type shape exactly, so `TimeIntervalUtils` is directly reusable for HC-01/02/04/05 with no conversion. `lab_unavailability.start_date_time`/`end_date_time` (Phase 5) are `TIMESTAMPTZ`/`Instant` — a genuine type boundary HC-06 (Phase 9) will need to cross. Rather than leaving that conversion to be solved independently inside `LabAvailabilityConstraint` (and risking three slightly-different ad hoc conversions if other future code needs the same bridge), Phase 8 introduces `SchedulingTimeMapper` (`com.college.laballocation.scheduling`) as the single, central `LocalDate + LocalTime + configured ZoneId → Instant` conversion, backed by a configurable `app.college.time-zone` property (env `COLLEGE_TIME_ZONE`, default `Asia/Kolkata`) rather than a hardcoded manual UTC offset — see ADR-037.
 
 ---
 
@@ -333,7 +345,7 @@ erDiagram
 
 This matches §3/§5 of [03-SYSTEM-ARCHITECTURE.md](03-SYSTEM-ARCHITECTURE.md) exactly; that document's ER diagram will be updated to reference this one rather than duplicating it.
 
-**Implementation status against this diagram (Phase 7):** `PROGRAM`, `STREAM`, `ACADEMIC_YEAR`, `DIVISION`, `BATCH`, `ACADEMIC_TERM`, `SUBJECT`, `FACULTY`, `SUBJECT_FACULTY_ASSIGNMENT`, `CR_ASSIGNMENT`, `APP_USER` (Phase 4); `LAB_TYPE`, `LAB`, `SOFTWARE`, `EQUIPMENT`, `LAB_SOFTWARE`, `LAB_EQUIPMENT`, `LAB_UNAVAILABILITY` (Phase 5); `SUBJECT_SOFTWARE_REQUIREMENT`, `SUBJECT_EQUIPMENT_REQUIREMENT`, `subject.required_lab_type_id`/`preferred_lab_type_id` (Phase 6); `FACULTY_AVAILABILITY` (Phase 7) are all real, migrated tables/columns. Everything else in this diagram (`SCHEDULE_VERSION`, `ALLOCATION`, `TIMETABLE_IMPORT*`, `AUDIT_LOG`) remains the Phase 1 plan, not yet implemented — Phase 8+ per the roadmap.
+**Implementation status against this diagram (Phase 8):** `PROGRAM`, `STREAM`, `ACADEMIC_YEAR`, `DIVISION`, `BATCH`, `ACADEMIC_TERM`, `SUBJECT`, `FACULTY`, `SUBJECT_FACULTY_ASSIGNMENT`, `CR_ASSIGNMENT`, `APP_USER` (Phase 4); `LAB_TYPE`, `LAB`, `SOFTWARE`, `EQUIPMENT`, `LAB_SOFTWARE`, `LAB_EQUIPMENT`, `LAB_UNAVAILABILITY` (Phase 5); `SUBJECT_SOFTWARE_REQUIREMENT`, `SUBJECT_EQUIPMENT_REQUIREMENT`, `subject.required_lab_type_id`/`preferred_lab_type_id` (Phase 6); `FACULTY_AVAILABILITY` (Phase 7); `SCHEDULE_VERSION`, `ALLOCATION` (Phase 8) are all real, migrated tables/columns. Everything else in this diagram (`TIMETABLE_IMPORT*`, `AUDIT_LOG`) remains the Phase 1 plan, not yet implemented — Phase 19+ per the roadmap. No `SchedulingConstraint` reads or writes `ALLOCATION` yet (Phase 9+); Phase 8 only establishes the table and its query infrastructure.
 
 ---
 

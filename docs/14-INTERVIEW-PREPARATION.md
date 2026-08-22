@@ -1,6 +1,6 @@
 # Interview Preparation
 
-**Status: mixed.** The Authentication & RBAC, Academic Domain, Laboratory Domain, Subject Requirements, and Faculty Availability sections are verified against real, working Phase 3-7 code. Everything about the scheduling engine, constraints, and performance remains Phase 1 design-level answers, explicitly marked `TO BE VERIFIED AFTER IMPLEMENTATION` — nothing below claims a benchmark, a passing test, or a working demo before those things exist.
+**Status: mixed.** The Authentication & RBAC, Academic Domain, Laboratory Domain, Subject Requirements, Faculty Availability, and Scheduling Domain/Allocation Persistence sections are verified against real, working Phase 3-8 code. Everything about constraint evaluation, candidate generation, scoring, and performance remains Phase 1 design-level answers, explicitly marked `TO BE VERIFIED AFTER IMPLEMENTATION` — nothing below claims a benchmark, a passing test, or a working demo before those things exist.
 
 ## Elevator Pitch (30 seconds)
 
@@ -197,6 +197,30 @@
 **How will the future scheduling engine consume this?** Not through the REST API — `FacultyAvailabilityConstraint` (Phase 9+, a `SchedulingConstraint` per docs/05-SCHEDULING-ENGINE.md) will call `FacultyAvailabilityService.isAvailable(...)` directly as an internal Spring bean dependency, the same way any other service-to-service call works in this codebase. This is also why `/api/faculty/{id}/availability*` was restricted to `LAB_ASSISTANT`-only (ADR-034) — the constraint engine never needs REST access to its own process's data.
 
 **Why is read access restricted to LAB_ASSISTANT here, unlike Labs/Subject Requirements where any authenticated role can read?** Because unlike lab capacity or subject requirements (genuinely useful context for a CR planning a request), raw faculty-availability rows have no demonstrated CR/STUDENT use case yet — this project's default is to open read access only where a real need exists, not because other domains happened to open theirs. See ADR-034; this can be loosened later without a breaking change if a real need appears.
+
+## Scheduling Domain & Allocation Persistence (Phase 8 — implemented, verified answers)
+
+**What is the difference between `Allocation` and `CandidateAllocation`?** `Allocation` is a persisted JPA entity representing a session that actually happened (or was formally decided) — created only once already known valid. `CandidateAllocation` is a plain, unpersisted record representing one possibility (a specific candidate lab) still being evaluated. Most candidates are rejected and discarded; only a winning one ever becomes a real `Allocation`.
+
+**Why is `CandidateAllocation` not persisted?** Persisting every candidate considered during a scheduling run — most of which fail hard constraints and are thrown away — would be pure waste, and would blur "this was actually booked" with "this was considered and rejected," a distinction NFR-08 and this project's whole constraint-based premise depend on staying clear. See ADR-038.
+
+**Why do you use `ScheduleVersion`?** So an official timetable revision never silently overwrites history — publishing a new version supersedes (never deletes) the term's previous published version, which is what lets students always see exactly one current version while every prior revision remains queryable (ADR-009).
+
+**Why preserve historical schedule versions instead of editing in place?** Because "what was the timetable actually like on the day a student attended" is a real, answerable question this project's audit/history requirements care about (NFR-06/NFR-07) — in-place edits would destroy that history the moment a correction was made.
+
+**Why does `Allocation` contain both `divisionId` and an optional `batchId`?** Every allocation belongs to a division regardless of its target type (`division_id` is always set); `batch_id` is only set for `BATCH`-targeted sessions. This single design choice is what makes HC-05's bidirectional division/batch conflict check answerable with one query (`findActiveForDivision`) instead of two separately-joined ones — see ADR-005 and docs/06-CONSTRAINTS.md HC-05.
+
+**How do you model BATCH vs. DIVISION?** An explicit `target_type` enum column (`BATCH`/`DIVISION`), not an implicit null-as-signal — enforced twice: `Allocation.forBatch`/`.forDivision` are the only constructors, and a database CHECK constraint (`chk_allocation_target_invariant`) backstops the same rule even against a hypothetical future application bug. The cross-table "does this batch actually belong to this division" half can't be a CHECK constraint (Postgres can't query another table in one), so `forBatch` checks it directly against the already-loaded `Batch` entity's `Division`.
+
+**Why store allocation date/time as `LocalDate`/`LocalTime` instead of `TIMESTAMPTZ`?** A session is inherently a single local-college-day event with no cross-timezone ambiguity relevant to *scheduling* it — matching `faculty_availability`'s shape (Phase 7) means `TimeIntervalUtils` is directly reusable with zero conversion for the four allocation-vs-allocation conflict checks (HC-01/02/04/05), which are the overwhelming majority of what needs this data. See ADR-036.
+
+**How do you bridge `LocalDate`/`LocalTime` with `LabUnavailability`'s `TIMESTAMPTZ`?** `SchedulingTimeMapper` — a single, central, tested component (`toInstant`/`toInstantRange`) that combines a date, a local time, and a configurable college `ZoneId` into a real `Instant`. Introduced now, ahead of Phase 9 actually needing it for HC-06, specifically so this conversion is solved once rather than reinvented ad hoc inside `LabAvailabilityConstraint` or duplicated by some future second consumer.
+
+**Why use a configurable `ZoneId` instead of a hardcoded offset like "UTC+5:30"?** A manual offset is silently wrong the moment any DST rule ever applies to the deployment zone, and it hides an important decision as an unlabeled magic number. `ZoneId`/`Instant` delegate to the JDK's own correct, maintained zone-rule database — the college's actual zone is one line of configuration (`COLLEGE_TIME_ZONE`), never scattered arithmetic.
+
+**Why don't you expose an allocation-create API yet?** Because an `Allocation` is only ever supposed to exist once it's already known valid, and nothing in this codebase can determine that yet — the constraint engine (Phase 9) doesn't exist. Opening a creation endpoint now would mean accepting arbitrary, unvalidated bookings, directly contradicting the entire premise of a constraint-based system. Verified live: `POST /api/allocations` returns `404`. See ADR-039.
+
+**Why are constraints a separate Phase 9 layer instead of built alongside the schema now?** Because "what a candidate/allocation *is*" (Phase 8 — the schema, the object shapes, the query infrastructure) and "whether a candidate is *valid*" (Phase 9 — the actual constraint logic) are genuinely different concerns with different dependencies; Phase 9 needs Phase 8's persisted data to exist first, so building them together would just mean building Phase 8 first anyway, without the clean phase boundary that keeps each one's own tests focused and reviewable.
 
 ## Real Engineering Problems Encountered
 

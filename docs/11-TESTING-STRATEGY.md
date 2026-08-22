@@ -51,6 +51,30 @@ No test result is ever claimed without actually running the suite (project worki
 
 **Manually verified against the Dockerized stack (2026-08-22):** all 8 of the phase brief's required scenarios (A–H — lab creation, unauthorized mutation, invalid capacity, duplicate code, Cloudera filter, capacity filter, combined filter, invalid unavailability interval) executed with real `curl` requests against the running containers, plus a restart-and-recount idempotency check on the dev seed data (15 labs → 16 after one test-created lab, software/lab_software/lab_equipment row counts unchanged across the restart).
 
+## Scheduling Domain & Allocation Persistence Tests — Implemented (Phase 8)
+
+| Test | Class | What it proves |
+|---|---|---|
+| BATCH-targeted request requires a batchId | `SchedulingRequestTest` | Structural validation runs with no Spring/database |
+| DIVISION-targeted request rejects a batchId | `SchedulingRequestTest` | Same, opposite direction |
+| Invalid time range rejected / valid range accepted | `SchedulingRequestTest` | Reuses `TimeIntervalUtils.isValid` |
+| Date + LocalTime + configured zone converts to the expected `Instant`, in both UTC and a fixed +05:30 zone | `SchedulingTimeMapperTest` | The college-timezone bridge is deterministic and zone-correct, not machine-local-timezone-dependent |
+| Start/end conversion produces a valid `InstantRange` | `SchedulingTimeMapperTest` | The range helper composes both conversions correctly |
+| `Allocation.forBatch` with a batch belonging to the target division succeeds | `AllocationTest` | Happy path |
+| `Allocation.forBatch` with a null batch is rejected | `AllocationTest` | Structural invariant |
+| `Allocation.forBatch` with a batch from a *different* division is rejected | `AllocationTest` | The cross-table check no CHECK constraint can express |
+| `Allocation.forDivision` never has a batch | `AllocationTest` | Structural invariant, opposite direction |
+| Invalid time range rejected regardless of target type | `AllocationTest` | Interval validation applies uniformly |
+| `publish()`/`cancel()` transition guards (APPROVED→PUBLISHED, reject re-publish, reject re-cancel) | `AllocationTest` | Lifecycle transitions match docs/03-SYSTEM-ARCHITECTURE.md §5 |
+| First schedule-version for a term needs no reason; a second requires one | `ScheduleVersionServiceTest` | Matches docs/04-DATABASE-DESIGN.md §7's "required for v2+" rule |
+| Publishing supersedes the term's previously-published version in the same call | `ScheduleVersionServiceTest` | ADR-009's versioning rule, service-level |
+| Publishing with no existing published version succeeds | `ScheduleVersionServiceTest` | The common first-publish case isn't over-guarded |
+| `SchedulingContextFactory` assembles a context for a BATCH request, including batch-scoped existing allocations | `SchedulingContextFactoryTest` | The factory correctly wires `AllocationQueryService`/`BatchService` together |
+| `SchedulingContextFactory` never calls `BatchService` for a DIVISION request | `SchedulingContextFactoryTest` | No wasted lookups for a request with no batch |
+| Full DB constraint + query-path verification (Testcontainers, environment-blocked here) | `AllocationPersistenceIT` | `chk_allocation_target_invariant`, `chk_allocation_interval`, `uq_schedule_version_term_number`, `uq_schedule_version_one_published_per_term`, and all four active-allocation query paths (lab/faculty/batch/division), with cancelled rows correctly excluded |
+
+**Manually verified against the Dockerized stack (2026-08-22):** Flyway migrated to v10; one `PUBLISHED` `schedule_version` seeded with zero `Allocation` rows (confirmed via `psql`); five DB-level guarantees proven with real transactional `psql` inserts (target invariant, interval CHECK, version-number uniqueness, one-published-per-term uniqueness — all four rejected exactly as designed); `POST /api/allocations` and `GET /api/allocations` both confirmed `404` (no accidental creation surface); a restart-and-recount idempotency check confirmed the schedule-version row count (1) unchanged across a backend container restart; Phase 3-7 regression endpoints re-verified with no regression.
+
 ## Time Interval Utility & Faculty Availability Tests — Implemented (Phase 7)
 
 | Test | Class | What it proves |
@@ -113,7 +137,9 @@ No test result is ever claimed without actually running the suite (project worki
 - Lab Assistant can manage CR assignments and accounts; CR cannot.
 - Ended `cr_assignment` immediately loses division-scoped access (no stale-permission caching).
 
-## Algorithm Test Coverage (Phase 8–14)
+## Algorithm Test Coverage (Phase 10–14)
+
+**Roadmap correction (Phase 8):** this section's heading previously read "Phase 8–14," a Phase-1-era label never revisited. Phase 8 (docs/03-SYSTEM-ARCHITECTURE.md §16) is now confirmed as the schema/domain-object foundation, not algorithm work — every scenario below (candidate generation, scoring, most-constrained-first, backtracking) is Phase 10 onward.
 
 - Candidate generation returns exactly the labs satisfying capacity/software/equipment/type filters — verified against fixture data with known expected sets.
 - Capacity-fit scoring formula matches the documented formula in [07-ALLOCATION-SCORING.md](07-ALLOCATION-SCORING.md) for hand-computed fixture values (e.g. strength 64 vs capacity 65/70/150 produces strictly descending scores).

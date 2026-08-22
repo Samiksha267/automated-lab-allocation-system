@@ -41,6 +41,7 @@ startA < endB   AND   startB < endA
 - **Reject when:** any existing active allocation for the same lab on the same date overlaps the candidate interval.
 - **Valid example:** Lab C-301 has BDA 09:00–11:00; candidate CNS in Lab C-302 09:00–11:00 → different lab, no conflict.
 - **Invalid example:** Lab C-301 has BDA 09:00–11:00; candidate CNS also in Lab C-301, 10:00–12:00 → overlaps → rejected.
+- **Source data implemented, Phase 8:** the `allocation` table and `AllocationQueryService.findActiveForLab(labId, date)` both exist and are independently verified (docs/04-DATABASE-DESIGN.md §7) — "active" is always `AllocationStatus.blocksScheduling()` (`APPROVED`/`PUBLISHED`), proven to exclude `CANCELLED` rows in a live query test. **Not implemented yet:** the actual `LabConflictConstraint` class that runs this query per candidate and applies `TimeIntervalUtils.overlaps(...)` — Phase 9.
 - **Error code:** `LAB_CONFLICT`.
 
 ## HC-02 — Faculty Conflict
@@ -50,6 +51,7 @@ startA < endB   AND   startB < endA
 - **Reject when:** the same faculty already has an overlapping active allocation — even in a different lab, even for a different batch.
 - **Valid example:** Faculty "BDA Faculty" teaches A1 09:00–11:00 in C-301; Faculty "CNS Faculty" teaches A2 09:00–11:00 in C-302 → different faculty → no conflict.
 - **Invalid example:** Faculty X teaches A1 09:00–11:00 in C-301 and is also requested for A2 09:00–11:00 in C-302 → same faculty, overlapping, different labs → **still rejected**.
+- **Source data implemented, Phase 8:** `AllocationQueryService.findActiveForFaculty(facultyId, date)` — precomputed once per `SchedulingContext` (candidate-independent, unlike HC-01) since faculty conflict never depends on which lab is being evaluated. **Not implemented yet:** the actual `FacultyConflictConstraint` class — Phase 9. Distinct from HC-03 (Faculty Availability, Phase 7) — see docs/03-SYSTEM-ARCHITECTURE.md for the availability-vs-conflict distinction.
 - **Error code:** `FACULTY_CONFLICT`.
 
 ## HC-03 — Faculty Availability
@@ -69,6 +71,7 @@ startA < endB   AND   startB < endA
 - **Reject when:** the same batch already has an overlapping active `BATCH` allocation.
 - **Valid example:** A1 BDA 09:00–11:00 (Lab C-301, Faculty X); A2 CNS 09:00–11:00 (Lab C-302, Faculty Y) → different batches → **valid**, not rejected by HC-04.
 - **Invalid example:** A1 BDA 09:00–11:00; new request A1 CNS 10:00–12:00 → same batch, overlapping → rejected.
+- **Source data implemented, Phase 8:** `AllocationQueryService.findActiveForBatch(batchId, date)` — precomputed once per `SchedulingContext`, candidate-independent. **Not implemented yet:** the actual `BatchConflictConstraint` class — Phase 9.
 - **Error code:** `BATCH_CONFLICT`.
 
 ## HC-05 — Division-Wide Conflict
@@ -81,17 +84,19 @@ startA < endB   AND   startB < endA
 - **Valid example:** No division-wide session scheduled; A1 and A2 both book batch-level sessions simultaneously → valid (governed by HC-04, not blocked by HC-05).
 - **Invalid example:** Division A has a division-wide guest lecture 09:00–11:00; a new request for batch A2 at 10:00–11:00 → rejected, whole division is occupied.
 - **Cross-division example (explicit — this is deliberately *not* a conflict):** Division A has a division-wide session 09:00–11:00; Division B (unrelated) has a division-wide session 09:00–11:00 → **valid**, HC-05 only ever compares allocations within the *same* `division_id`; two different divisions running division-wide sessions simultaneously is not an academic conflict at all (it may still be rejected by HC-01/HC-02 if they happen to share a lab or faculty, but that is those constraints' job, not HC-05's).
+- **Source data implemented, Phase 8:** `AllocationQueryService.findActiveForDivision(divisionId, date)` returns **both** `DIVISION`-wide and `BATCH` rows for that division with a single query, no join required — `division_id` is always set on every `Allocation` row regardless of `target_type` (docs/04-DATABASE-DESIGN.md §7), so the bidirectional check this rule describes is already directly queryable today; the future `DivisionConflictConstraint` (Phase 9) only needs to filter the returned rows by `targetType` and apply the overlap rule, not run two separate joined queries.
 - **Error code:** `DIVISION_CONFLICT`.
 
 ## HC-06 — Lab Availability (maintenance)
 
 - **Rule:** A lab under an active `lab_unavailability` window overlapping the candidate's requested interval cannot be scheduled.
-- **Source data (implemented, Phase 5):** `lab.active` (permanent deactivation — a `false` lab is never a candidate at all) and `lab_unavailability` (`start_date_time`/`end_date_time`, `TIMESTAMPTZ`, half-open `[start, end)` — see [04-DATABASE-DESIGN.md §4](04-DATABASE-DESIGN.md)). The third input, real allocation data, does not exist until Phase 9+ — HC-06 itself combines all three; only the first two exist yet.
+- **Source data (implemented, Phase 5 + Phase 8):** `lab.active` (permanent deactivation — a `false` lab is never a candidate at all) and `lab_unavailability` (`start_date_time`/`end_date_time`, `TIMESTAMPTZ`, half-open `[start, end)` — see [04-DATABASE-DESIGN.md §4](04-DATABASE-DESIGN.md)). The third input, real allocation data, now exists too (`allocation`, Phase 8) — all three data sources HC-06 will combine are real as of this phase; only the comparison logic itself remains unwritten.
+- **The type bridge this constraint will need:** `Allocation`'s `allocation_date`/`start_time`/`end_time` are `LocalDate`/`LocalTime`; `lab_unavailability`'s columns are `TIMESTAMPTZ`/`Instant`. `SchedulingTimeMapper` (Phase 8, `com.college.laballocation.scheduling`) is the resolved, tested bridge between the two (`toInstant`/`toInstantRange`, using the configurable `app.college.time-zone`) — introduced now specifically so `LabAvailabilityConstraint` doesn't have to invent this conversion itself, or worse, three future constraints each invent a slightly different one. See ADR-037.
 - **Reject when (once implemented):** candidate interval overlaps any `lab_unavailability` row for that lab, using the same half-open interval overlap rule as everywhere else in this document (not the date-only comparison this document's Phase 1 draft originally sketched — Phase 5 implemented full datetime granularity, see docs/04-DATABASE-DESIGN.md).
 - **Valid example:** Lab C-303 unavailable 2026-08-25 09:00–17:00; candidate 2026-08-26 09:00–11:00 → valid.
 - **Invalid example:** Lab C-303 unavailable 2026-08-25 09:00–17:00; candidate 2026-08-25 10:00–12:00 → rejected (overlaps).
 - **Error code:** `LAB_UNAVAILABLE`.
-- **Not implemented yet:** the actual `LabAvailabilityConstraint` class and any combination with allocation data — Phase 9+.
+- **Not implemented yet:** the actual `LabAvailabilityConstraint` class that reads all three sources and performs the comparison (now that the timezone bridge exists, this is purely a matter of writing the constraint itself) — Phase 9.
 
 ## HC-07 — Capacity
 

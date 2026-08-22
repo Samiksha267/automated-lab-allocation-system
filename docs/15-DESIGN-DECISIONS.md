@@ -489,3 +489,79 @@ ADR-style log of significant, hard-to-reverse decisions. Each entry: Context, De
 **Reasons:** This project's default posture on new surface area is to open only what has a demonstrated need (the same reasoning behind not adding speculative columns, ADR-026/ADR-030) — read access is not free just because other domains happened to open it, each domain's access model is a decision, not an inherited default.
 
 **Trade-offs:** If a future phase determines CRs genuinely need to see faculty availability (e.g. to explain why an extra-lab request failed), this endpoint would need to be reopened for CR reads specifically — a straightforward, backward-compatible change (loosening `@PreAuthorize`, not a breaking one) tracked here rather than pre-emptively built now on a guess.
+
+---
+
+## ADR-035: Phase 8 Roadmap Clarification — Scheduling Domain vs. Constraint Engine
+
+**Context:** A single Phase-1-era reference in docs/03-SYSTEM-ARCHITECTURE.md tagged the entire Scheduling Engine document "(Phase 8)" without distinguishing persisted schema from algorithm, and was never revisited across Phases 4-7 even as every one of those phases' own documentation independently and consistently referred to "Phase 9" as the Constraint Engine. This produced a genuine, if narrow, roadmap inconsistency, surfaced during Phase 8's own pre-phase documentation review.
+
+**Decision:** Phase 8 is formally **Scheduling Domain & Allocation Persistence Foundation** — it builds the `Allocation`/`ScheduleVersion` tables and the pure `SchedulingRequest`/`SchedulingContext`/`CandidateAllocation`/`ConstraintResult`/`ConstraintViolation` object *shapes*. Phase 9 remains the Constraint Engine. The full corrected sequence (Phase 8-16) is recorded in docs/03-SYSTEM-ARCHITECTURE.md §16.
+
+**Reasons:** Phase 9's conflict constraints (HC-01/02/04/05/06) need real, queryable allocation data to evaluate against — a constraint engine cannot meaningfully exist before something has created the table it queries. This ordering is not a preference, it is a hard dependency: "whether a candidate is valid" (Phase 9) cannot be answered before "what a candidate/allocation *is*" (Phase 8) has a persisted shape to check against.
+
+**Trade-offs:** None to the actual business requirements (docs/02-REQUIREMENTS.md) — every FR/HC this project has already specified is unaffected; this is purely a correction to a stale internal cross-reference, not a scope or requirement change.
+
+---
+
+## ADR-036: Allocation Represented as `LocalDate` + `LocalTime`, Not `TIMESTAMPTZ`
+
+**Context:** `faculty_availability` (Phase 7) and `lab_unavailability` (Phase 5) took two different approaches to time representation — the former recurring-weekly `LocalTime`, the latter full-precision `TIMESTAMPTZ`/`Instant`. `Allocation` needed its own explicit decision, not an automatic inheritance of either.
+
+**Decision:** `Allocation.allocationDate`/`startTime`/`endTime` are `LocalDate`/`LocalTime` (DB `DATE`/`TIME`), matching `faculty_availability`'s shape, not `lab_unavailability`'s.
+
+**Reasons:** An allocation is inherently a single local-college-day session with no timezone ambiguity relevant to *scheduling* it (the Lab Assistant/CR always thinks and enters times in local wall-clock terms: "Monday 9 to 11") - overnight sessions are explicitly out of scope (PART 10 of the Phase 8 brief). `LabUnavailability`'s `TIMESTAMPTZ` precision exists for a different reason (a maintenance window that might span a specific real-world instant, potentially useful for cross-referencing external system timestamps) that doesn't apply to a teaching session. Using `LocalDate`/`LocalTime` also means `TimeIntervalUtils` (Phase 7) is directly reusable for `Allocation`-vs-`Allocation` overlap checks (HC-01/02/04/05) with zero conversion.
+
+**Trade-offs:** Comparing an `Allocation` against `LabUnavailability` (HC-06) now requires an explicit bridge, since the two use different temporal types — see ADR-037. This was judged the better trade-off than forcing `Allocation` into `TIMESTAMPTZ` purely to match one single-use-case constraint's convenience, at the cost of every other constraint (HC-01/02/04/05, the overwhelming majority) needing a needless conversion instead.
+
+---
+
+## ADR-037: Configurable College Timezone + a Central `LocalDate`/`LocalTime` ↔ `Instant` Bridge
+
+**Context:** ADR-036's choice creates a real type boundary: `Allocation` (`LocalDate`+`LocalTime`) vs. `LabUnavailability` (`TIMESTAMPTZ`/`Instant`) that HC-06 (Phase 9) must cross. Left unaddressed, this risks either being solved ad hoc inside `LabAvailabilityConstraint` alone, or worse, solved slightly differently by some future second consumer of the same conversion.
+
+**Decision:** `SchedulingTimeMapper` (`com.college.laballocation.scheduling`), a single Spring component providing `toInstant(LocalDate, LocalTime)` and `toInstantRange(LocalDate, LocalTime, LocalTime)`, backed by a configurable `app.college.time-zone` property (env `COLLEGE_TIME_ZONE`, default `Asia/Kolkata`) resolved to a real `java.time.ZoneId`.
+
+**Alternatives:** A hardcoded manual offset (e.g. "always add 5 hours 30 minutes") was explicitly rejected (PART 47 of the Phase 8 brief) — it would silently be wrong the day any DST rule ever applied to the deployment zone, and more subtly, it hides the timezone decision as an unlabeled magic number rather than a named, greppable configuration property. Using `ZoneId`/`Instant` lets the JDK's own, correct zone-rule database handle this, not hand-rolled arithmetic.
+
+**Reasons:** Solving this once, centrally, and now (rather than leaving it to Phase 9) means `LabAvailabilityConstraint` will only ever need to call `SchedulingTimeMapper`, not invent the conversion itself — consistent with this project's general preference for shared utilities over near-duplicate implementations (the same reasoning behind introducing `TimeIntervalUtils` in Phase 7 ahead of having three constraints that would each need overlap logic).
+
+**Trade-offs:** None significant — a college realistically operates in one timezone; if a future deployment genuinely spans multiple timezones, this design would need revisiting, but that is not a real requirement of this project today.
+
+---
+
+## ADR-038: `CandidateAllocation` Is a Transient Domain Object, Never a JPA Entity
+
+**Context:** `Allocation` (persisted) and `CandidateAllocation` (the proposed, unpersisted possibility a future constraint engine evaluates) needed a clear, enforced boundary — PART 22 of the Phase 8 brief explicitly warns against conflating them.
+
+**Decision:** `CandidateAllocation` is a plain Java `record` with no JPA annotations, holding a `SchedulingContext` and a candidate `labId`/`labCode` — never persisted, never given an `@Entity` mapping.
+
+**Reasons:** Most candidates evaluated during a single scheduling run are rejected (docs/05-SCHEDULING-ENGINE.md's validation pipeline explicitly removes invalid candidates before scoring) — persisting every one, even transiently, would be pure waste and would blur the meaning of "this was actually booked" (an `Allocation` row) with "this was considered and discarded" (a `CandidateAllocation`), a distinction this project's NFR-08 (domain objects decoupled from JPA/HTTP) already requires generally and this decision makes concrete for scheduling specifically.
+
+**Trade-offs:** None — this is the standard, expected shape for a CSP's candidate objects; the alternative (a `@Entity` "candidate" table) has no precedent anywhere else in this project's design and no real motivating use case.
+
+---
+
+## ADR-039: No Raw Allocation Creation API Before the Constraint Engine Exists
+
+**Context:** `Allocation`/`ScheduleVersion` now have real repositories and services (Phase 8) — the question was whether to expose any create endpoint now, versus deferring until Phase 9/15/19 actually validate what gets created.
+
+**Decision:** No controller exists for either entity. `POST /api/allocations` and `GET /api/allocations` are both confirmed `404` against the live stack. `Allocation` rows are only ever created via direct repository calls in tests and the dev seeder during this phase.
+
+**Reasons:** An `Allocation` row is only ever supposed to be created once it is already known valid (docs/03-SYSTEM-ARCHITECTURE.md §5) — before Phase 9's constraint engine exists, there is no code capable of deciding "is this candidate actually valid," so any creation endpoint opened now would necessarily accept unvalidated bookings, directly contradicting the project's central premise (this is a constraint-based system, not a CRUD app). Building the endpoint now and "just not linking it from the UI" is not a real safeguard - a real client could still call it.
+
+**Trade-offs:** Test coverage for `Allocation` construction and lifecycle transitions must go through repositories/entity factories directly rather than through HTTP in this phase - an acceptable, deliberate limitation until Phase 15 (extra-lab booking) and Phase 19 (PDF import approval) build the two real creation paths on top of Phase 9's validated constraint engine.
+
+---
+
+## ADR-040: At-Most-One-Published-ScheduleVersion Enforced via a Partial Unique Index
+
+**Context:** ADR-009 (Phase 1) already established that exactly one `PUBLISHED` `ScheduleVersion` should exist per term at a time, but left the enforcement mechanism unspecified pending real implementation.
+
+**Decision:** `ScheduleVersionService.publish()` actively supersedes the term's previous `PUBLISHED` version in the same call, **and** a partial unique index (`uq_schedule_version_one_published_per_term ON schedule_version (academic_term_id) WHERE status = 'PUBLISHED'`) makes the invalid two-published state structurally impossible at the database level.
+
+**Alternatives:** Relying on application code alone (the service always supersedes correctly) was rejected per this project's standing defense-in-depth pattern (see HC design generally, and `chk_subject_lab_type_pref`/`chk_allocation_target_invariant` elsewhere) — a future bug, a bulk script, or a direct SQL fix could otherwise silently leave two `PUBLISHED` versions for one term, an inconsistency the rest of the system (student timetable view, Phase 18+) has no way to detect or recover from gracefully.
+
+**Reasons:** A partial unique index is the cheapest possible database-level guarantee for this specific invariant — it costs one small index and is verified directly: a second `PUBLISHED` row insert for the same term was rejected by Postgres in a live transactional test (docs/11-TESTING-STRATEGY.md).
+
+**Trade-offs:** None significant — this mirrors the exact pattern already used for `subject`'s required/preferred lab-type mutual exclusivity (ADR-028) and `cr_assignment`'s at-most-one-active-per-division/user partial indexes (Phase 4).
