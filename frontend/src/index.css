@@ -1,0 +1,4 @@
+@import "tailwindcss";
+
+/* Minimal foundation only - visual polish is not a Phase 2 goal.
+   Role-specific dashboards will bring their own styling in later phases. */

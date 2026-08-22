@@ -1,0 +1,19 @@
+logging:
+  level:
+    com.college.laballocation: DEBUG
+    org.flywaydb: DEBUG
+
+management:
+  endpoint:
+    health:
+      show-details: always
+
+app:
+  # Consumed only by DevUserSeeder, which is itself @Profile("dev") - these
+  # keys don't need to exist in any other profile. Override via env vars for
+  # anything beyond a throwaway local database; the fallbacks are documented,
+  # non-secret demo values (docs/13-DEVELOPER-SETUP.md), never used outside dev.
+  dev-seed:
+    lab-assistant-password: ${DEMO_LAB_ASSISTANT_PASSWORD:LabAssistant123!}
+    cr-password: ${DEMO_CR_PASSWORD:CrDemo123!}
+    student-password: ${DEMO_STUDENT_PASSWORD:Student123!}

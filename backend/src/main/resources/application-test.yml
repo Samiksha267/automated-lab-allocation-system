@@ -1,0 +1,11 @@
+# Datasource values are overridden at runtime by @DynamicPropertySource in
+# integration tests (Testcontainers-backed PostgreSQL) - see
+# LabAllocationBackendApplicationTests. Nothing here should assume a fixed DB.
+spring:
+  jpa:
+    hibernate:
+      ddl-auto: validate
+
+logging:
+  level:
+    com.college.laballocation: DEBUG

@@ -1,0 +1,59 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-lab_allocation}
+      POSTGRES_USER: ${POSTGRES_USER:-lab_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-lab_user} -d ${POSTGRES_DB:-lab_allocation}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-lab_allocation}
+      DB_USER: ${POSTGRES_USER:-lab_user}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-change_me}
+      SERVER_PORT: 8080
+      SPRING_PROFILES_ACTIVE: dev
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:5173}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env - see .env.example}
+      JWT_EXPIRATION_MINUTES: ${JWT_EXPIRATION_MINUTES:-60}
+      DEMO_LAB_ASSISTANT_PASSWORD: ${DEMO_LAB_ASSISTANT_PASSWORD:-LabAssistant123!}
+      DEMO_CR_PASSWORD: ${DEMO_CR_PASSWORD:-CrDemo123!}
+      DEMO_STUDENT_PASSWORD: ${DEMO_STUDENT_PASSWORD:-Student123!}
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/actuator/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8080/api}
+    ports:
+      - "5173:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  postgres-data:

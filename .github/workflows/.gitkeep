@@ -1,0 +1,5 @@
+# Placeholder - CI pipeline (backend compile/test, frontend lint/test/build,
+# Docker validation) is implemented in Phase 27 (see docs roadmap in
+# memory / project instructions), not in Phase 2 (Project Foundation).
+# This directory exists now so the repository structure matches
+# docs/03-SYSTEM-ARCHITECTURE.md without a premature, untested workflow file.

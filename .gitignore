@@ -1,0 +1,38 @@
+# Environment
+.env
+.env.*
+!.env.example
+
+# Node / Frontend
+node_modules/
+dist/
+build/
+.vite/
+coverage/
+
+# Java / Backend
+target/
+*.class
+*.jar
+!.mvn/wrapper/maven-wrapper.jar
+HELP.md
+
+# IDE
+.idea/
+.vscode/
+*.iml
+*.iws
+.classpath
+.project
+.settings/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Docker
+docker-data/
