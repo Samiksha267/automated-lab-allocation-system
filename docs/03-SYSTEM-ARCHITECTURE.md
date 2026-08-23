@@ -636,3 +636,43 @@ All sixteen of the phase brief's required manual scenarios executed against the 
 ### Deviations from the Phase 1 plan
 
 None to the constraint *rules* themselves - every HC-01..HC-12 implementation matches docs/06-CONSTRAINTS.md's Phase 1-through-6 specification exactly. Two real, deliberate additions beyond the original plan, both because manual Docker verification surfaced a genuine need: `ConstraintOutcome`'s three-way PASS/FAIL/NOT_APPLICABLE split (Phase 1 never anticipated a constraint being inapplicable rather than satisfied) and the `CrOwnershipService.getCurrentAssignment`-over-`requireOwnsDivision` fix described above (an implementation detail invisible to the constraint *specification*, but a real architectural lesson about exceptions and Spring transaction boundaries).
+
+## 18. Phase 10 — Candidate Generation (implemented)
+
+### Pipeline
+
+```mermaid
+flowchart TD
+    Req[SchedulingRequest] --> CtxF[SchedulingContextFactory.build - once per request]
+    CtxF --> Ctx[SchedulingContext]
+    Ctx --> Gen[CandidateGenerator]
+    Gen -->|every lab, code ascending| CandF[CandidateAllocationFactory.build - once per lab]
+    CandF --> Cand[CandidateAllocation]
+    Cand --> CE[ConstraintEngine.evaluate - once per lab]
+    CE --> EC[EvaluatedCandidate]
+    EC --> Result[CandidateGenerationResult: all evaluated, valid() and invalid() views]
+```
+
+`CandidateGenerator` is the layer between Phase 8's `SchedulingContextFactory`/`CandidateAllocationFactory` and Phase 9's `ConstraintEngine` - it answers "which labs should be considered?" as a deliberately separate question from Phase 9's "is a considered lab valid?" and Phase 11's future "which valid lab is preferable?". See docs/05-SCHEDULING-ENGINE.md for the full architecture notes (all-labs-considered, no first-fit, invalid-candidate preservation, context-reuse, query strategy).
+
+### New backend additions (Phase 10)
+
+```
+com.college.laballocation.scheduling.generation/   CandidateGenerator (@Service)
+                                                     EvaluatedCandidate (candidate + ConstraintEvaluation)
+                                                     CandidateGenerationResult (all/valid()/invalid() views)
+```
+
+No new migration - Phase 10 is entirely code against the existing Phase 8/9 schema and services, confirmed live: Flyway remained at schema version 10 after this phase's work.
+
+### No production candidate-search API (still, PART 62 of the phase brief)
+
+`CandidateGenerator` remains internal - no `POST /api/allocations/search` or equivalent was added. Phase 15 (CR-facing extra-lab search) is where a real endpoint around this capability belongs, once authorization, request shaping, and response formatting for an end user are actually being designed together; adding one now would be speculative surface area.
+
+### Verified end-to-end (Dockerized, 2026-08-23)
+
+A temporary, `@Profile("dev")`-only `ApplicationRunner` (`DevCandidateGenerationVerificationRunner`, deleted after use, same safe pattern as Phase 9's) exercised the real `CandidateGenerator` against the real dev-seeded demo data over live Docker/Postgres. All required scenarios passed: basic generation produced exactly one candidate per lab in the system (16/16, no first-fit); BDA's non-Cloudera lab (C-304) was generated and specifically rejected with `SOFTWARE_MISMATCH`; a BATCH-targeted request correctly compared candidate capacity against the *batch's* strength (not the division's - a real distinction HC-07 already made in Phase 9, confirmed here at the generation layer) and a DIVISION-targeted request against the *division's* strength on the same lab; an existing `Allocation` temporarily placed on an otherwise-valid lab flipped it to invalid (`LAB_CONFLICT`) on regeneration, then cleanup restored it to valid; a temporary `LabUnavailability` window produced `LAB_UNAVAILABLE` on regeneration, then cleanup restored validity; temporarily inflating a batch's required strength drove every lab invalid at once, and generation still completed normally with an empty valid list rather than throwing; and the A1/A2 scenario held at the generation layer - a real, persisted A1 allocation did not eliminate A2's own candidate set (15 of 16 labs remained valid, the one exception being A1's own occupied lab). Confirmed via `psql` after the run that every temporary row/mutation was cleaned up and reverted (zero leftover allocations/unavailability rows, division and batch strengths restored to seeded values). Regression re-verified: all Phase 3-9 endpoints still 200; `/api/allocations` still 404; Flyway still at schema version 10.
+
+### Deviations from the Phase 1 plan
+
+One real correction, not to Phase 10 itself but to an assumption baked into the Phase 1 sketch of the validation pipeline (docs/05-SCHEDULING-ENGINE.md): the original "Generate Candidate Labs" pipeline step described prefiltering by capacity/software/type before constraint validation. Phase 10 deliberately implements the opposite - generate from every lab, let `ConstraintEngine` be the sole authority on validity - specifically to avoid a second, parallel filtering path that could silently disagree with Phase 9, and to keep every rejection explainable (a prefiltered-out lab never becomes a candidate, so it would have no attached `ConstraintViolation` for Phase 12/13 to read later). See ADR in docs/15-DESIGN-DECISIONS.md.

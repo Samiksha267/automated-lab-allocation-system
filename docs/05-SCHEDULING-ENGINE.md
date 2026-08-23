@@ -1,6 +1,44 @@
 # Scheduling Engine
 
-**Status (Phase 9):** The Constraint Engine now exists and is real, tested code — `ConstraintEngine`, `SchedulingConstraint`, `ConstraintEvaluation`, and all twelve HC-01..HC-12 implementations (`com.college.laballocation.scheduling.constraint`) evaluate a `CandidateAllocation` against a `SchedulingContext` and return structured `ConstraintResult`s. **No candidate generation, scoring, alternative search, or backtracking exists yet** — Phase 9 establishes whether one already-identified candidate is *valid*; Phase 10 generates the candidate list in the first place (docs/03-SYSTEM-ARCHITECTURE.md §17). `AllocationDecision`, `ScoreBreakdown`, `AlternativeAllocation`, and `SchedulingMetrics` remain design-only, deliberately deferred to the phases that actually need them (Phase 11-13) rather than built now as empty scaffolding.
+**Status (Phase 10):** Candidate Generation now exists and is real, tested code — `CandidateGenerator` (`com.college.laballocation.scheduling.generation`) takes one `SchedulingRequest`, builds its `SchedulingContext` once, and produces an `EvaluatedCandidate` (candidate + `ConstraintEvaluation`) for every lab in the system via the unmodified Phase 9 `ConstraintEngine`. **No scoring, ranking, alternative-time search, or backtracking exists yet** — Phase 10 answers "which labs should be considered, and is each one valid?"; Phase 11 will decide which valid candidate is *preferable* (docs/03-SYSTEM-ARCHITECTURE.md §18). `AllocationDecision`, `ScoreBreakdown`, `AlternativeAllocation`, and `SchedulingMetrics` remain design-only, deliberately deferred to the phases that actually need them (Phase 11-13) rather than built now as empty scaffolding.
+
+## Candidate Generation (Phase 10)
+
+```
+SchedulingRequest
+        ↓
+SchedulingContextFactory.build            (once per request)
+        ↓
+SchedulingContext
+        ↓
+CandidateGenerator: for every lab, in code order (lab.code ascending)
+        ↓
+CandidateAllocationFactory.build(context, labId)   (once per lab)
+        ↓
+CandidateAllocation
+        ↓
+ConstraintEngine.evaluate(context, candidate)      (once per lab - the real, unmodified Phase 9 engine)
+        ↓
+EvaluatedCandidate{candidate, constraintEvaluation}
+        ↓
+CandidateGenerationResult{request, evaluatedCandidates}
+```
+
+**All labs considered, no first-fit:** every lab in the system becomes exactly one candidate, evaluated through the real `ConstraintEngine` - there is no early return the moment a valid lab is found (PART 19 of the Phase 10 brief; this is precisely the naive "return the first available lab" behavior this project's whole premise argues against). Verified live in Docker: a 16-lab system produces exactly 16 evaluated candidates for a single request, regardless of how many are valid.
+
+**Both valid and invalid candidates are preserved:** `CandidateGenerationResult` retains every `EvaluatedCandidate`, not just the valid ones - `validCandidates()`/`invalidCandidates()` are filtered views over the same underlying list, computed on demand, never a second generation pass. Rejected candidates keep their full `ConstraintViolation` list attached, which Phase 12 (explainability) and Phase 13 (alternatives) will read directly rather than re-running the engine.
+
+**Zero valid candidates is a normal result, never an exception:** if every lab fails some constraint, `CandidateGenerationResult.validCandidates()` is simply empty - verified live by temporarily inflating a batch's required strength so every lab fails HC-07, confirming generation still completes and returns a well-formed (all-invalid) result rather than throwing.
+
+**No constraint duplication in the generator:** `CandidateGenerator` contains no capacity/software/availability conditionals of its own - the *only* filtering decision it makes is which labs exist to iterate over (every lab in the system) and in what order to return them (deterministic, lab code ascending - never a preference ranking). All validity decisions still belong exclusively to the Phase 9 `ConstraintEngine`, so Phase 9 and Phase 10 can never disagree about whether a candidate is valid.
+
+**Candidate universe includes inactive/unavailable labs (Design B, ADR in docs/15-DESIGN-DECISIONS.md):** the generator does not prefilter out `active = false` labs or labs with an overlapping `LabUnavailability` window before generating a candidate - it queries every lab and lets HC-06 (`LabAvailabilityConstraint`) reject them structurally, so a rejected candidate carries a real, explainable violation rather than silently vanishing from the considered set. At the current ~15-16 lab scale this costs nothing meaningful.
+
+**Context built once, reused for every candidate:** `SchedulingContextFactory.build(request)` runs exactly once per `generate(...)` call (verified with a dedicated Mockito test asserting exactly one invocation regardless of lab count) - the resulting `SchedulingContext` (subject/faculty/division/batch identity, existing faculty/batch/division allocations) is passed unchanged into every one of the N `CandidateAllocationFactory.build(...)` and `ConstraintEngine.evaluate(...)` calls that follow, so candidate-independent data is never reloaded per lab.
+
+**Query strategy, honestly documented:** for N labs, generation issues one `SchedulingContextFactory` read (≈7 queries, once) plus, per lab, `CandidateAllocationFactory`'s existing Phase 9 loading (lab entity, installed software, installed equipment, existing lab allocations, unavailability windows - 5 queries). At the current ~15-16 lab scale this is roughly 75-85 total queries for one full generation run - a real, bounded N+1 shape, not eliminated in this phase. `CandidateAllocationFactory` (Phase 9) was deliberately not rewritten into a bulk loader here: Phase 9's behavior and tests were left untouched (PART 4/75 of the Phase 10 brief - do not rebuild Phase 9 without evidence of a real problem), and 75-85 queries for one interactive candidate-search request is not a demonstrated bottleneck at this project's scale. If a future phase's usage pattern makes this a real cost, the documented optimization path is a bulk variant (e.g. `LabSoftwareRepository.findByLabIdIn(labIds)` grouped by lab) rather than N separate per-lab queries - not built now because no evidence currently justifies it (Phase 25 benchmarks formally).
+
+**Read-only, advisory, and stateless between calls:** the whole `generate(...)` call runs inside one `@Transactional(readOnly = true)` boundary (the default propagation joins `SchedulingContextFactory`/`CandidateAllocationFactory`/`ConstraintEngine`'s own read-only transactions into the same one) - no write occurs, no lab is reserved, no result is cached. A candidate valid *at generation time* is not a booking; another request could occupy the same lab before any future booking commit actually happens. Phase 16 is responsible for revalidating and committing safely under concurrency - Phase 10 deliberately does not attempt to solve that here.
 
 ## The Constraint Engine (Phase 9)
 
@@ -67,11 +105,12 @@ This is a **Constraint Satisfaction Problem (CSP)** for single-session validatio
 |---|---|---|
 | `SchedulingRequest` | **Implemented (Phase 8, extended Phase 9)** | Immutable record: `allocationType`, `targetType`, `divisionId`, `batchId?`, `subjectId`, **`facultyId` already resolved** (see below), `academicTermId`, `allocationDate`, `startTime`, `endTime`, **`actor?` (Phase 9)** — a nullable `SchedulingActor{userId, role}` resolved before the request exists, the same way `facultyId` is, for HC-11. Self-validates the target/batch structural invariant and the time interval in its compact constructor — no Spring, no database. |
 | `SchedulingContext` | **Implemented (Phase 8, extended Phase 9)** | Everything needed to evaluate a request that does **not** vary per candidate lab: resolved subject/faculty/division/batch identity snapshots (Phase 9 added `academicYearId` to Subject/Division refs for HC-12, and `requiredLabTypeId` to Subject ref for HC-10), plus existing active allocations for the faculty/batch/division on the requested date (candidate-independent — HC-02/04/05's inputs). Deliberately excludes lab-specific data (existing lab allocations, lab unavailability) since that varies per candidate and is queried once per candidate instead (HC-01/06) — see docs/03-SYSTEM-ARCHITECTURE.md §16/17. Assembled by `SchedulingContextFactory` from existing Phase 4/5 services + Phase 8's `AllocationQueryService`; the class itself performs no queries. |
-| `CandidateAllocation` | **Implemented (Phase 8 shape, populated Phase 9)** | `(SchedulingContext, LabRef)` - `LabRef` (Phase 9) replaced the Phase 8 bare `labId`/`labCode` with a full candidate-specific snapshot (capacity, lab type, installed software/equipment, existing lab allocations, unavailability windows), built once per candidate by the new `CandidateAllocationFactory` so HC-01/06/07/08/09/10 never independently re-query the same lab. Never persisted, never scored, never generated by this phase (candidate generation is Phase 10). |
+| `CandidateAllocation` | **Implemented (Phase 8 shape, populated Phase 9, generated Phase 10)** | `(SchedulingContext, LabRef)` - `LabRef` (Phase 9) replaced the Phase 8 bare `labId`/`labCode` with a full candidate-specific snapshot (capacity, lab type, installed software/equipment, existing lab allocations, unavailability windows), built once per candidate by `CandidateAllocationFactory` so HC-01/06/07/08/09/10 never independently re-query the same lab. `CandidateGenerator` (Phase 10) is what actually builds one per lab, for every lab in the system. Never persisted, never scored. |
 | `ConstraintResult` | **Implemented (Phase 8 shape, extended Phase 9)** | `(HardConstraintId, ConstraintOutcome, ConstraintViolation?)` from one `SchedulingConstraint` - `ConstraintOutcome` (Phase 9: PASS/FAIL/NOT_APPLICABLE) replaced Phase 8's plain `boolean passed`, specifically for HC-11's applicability semantics. Self-validates that a FAIL result carries a violation and a PASS/NOT_APPLICABLE result never does. |
 | `ConstraintViolation` | **Implemented (Phase 8), populated for real (Phase 9)** | `errorCode`, `message`, `affectedResourceType`, `affectedResourceId`, `details` — maps directly to the API error model, deliberately not an untyped `Map`-only shape. |
 | `HardConstraintId` | **Implemented (Phase 8)** | Stable enum (`HC_01_LAB_CONFLICT` .. `HC_12_ACADEMIC_RELATIONSHIP`) identifying *which* constraint produced a `ConstraintResult` — kept separate from the wire-level API error codes in `ConstraintViolation`. |
 | `ConstraintEngine` / `ConstraintEvaluation` / `SchedulingConstraint` | **Implemented (Phase 9)** | The engine itself, its aggregate result type, and the interface every HC-01..HC-12 class implements. See "The Constraint Engine" section above. |
+| `CandidateGenerator` / `EvaluatedCandidate` / `CandidateGenerationResult` | **Implemented (Phase 10)** | `CandidateGenerator.generate(request)` (a `@Service`, not a pure record - it orchestrates real repository/factory/engine calls) returns a `CandidateGenerationResult`, which holds every `EvaluatedCandidate{candidate, constraintEvaluation}` for the request, valid and invalid alike. See "Candidate Generation" section above. |
 | `ScoreBreakdown` | Not yet implemented | Per-factor scores + total, from the scoring engine — Phase 11. |
 | `AllocationDecision` | Not yet implemented, deliberately deferred | Final outcome: selected candidate + full explanation, or failure + alternatives. Its real shape depends on scoring (Phase 11) and alternatives (Phase 13), neither of which exist yet; building it now would be speculative scaffolding rather than a tested contract. Phase 12 (Explainable Allocation) is where it belongs. |
 | `AlternativeAllocation` | Not yet implemented | A ranked fallback suggestion when the originally requested slot fails — Phase 13. |
@@ -88,18 +127,20 @@ SchedulingRequest
       ↓
 Resolve SchedulingContext (load relevant allocations, availability, inventory)     [implemented, Phase 8]
       ↓
-Generate Candidate Labs (active + capacity ≥ required + required software/equipment/type present)   [Phase 10]
+Generate Candidate Labs - every lab, no prefiltering    [CandidateGenerator - implemented, Phase 10]
       ↓
 Validate Hard Constraints (HC-01..HC-12) against each candidate    [ConstraintEngine - implemented, Phase 9]
       ↓
-Remove Invalid Candidates (recording ConstraintViolation per rejection)
+CandidateGenerationResult retains BOTH valid and invalid candidates    [implemented, Phase 10]
       ↓
-Score Remaining Candidates (07-ALLOCATION-SCORING.md)    [Phase 11]
+Score Remaining (Valid) Candidates (07-ALLOCATION-SCORING.md)    [Phase 11]
       ↓
 Rank Candidates
       ↓
 Return AllocationDecision: ranked valid candidates + explained rejections
 ```
+
+**Correction to the original Phase 1 sketch:** the line above originally read "Generate Candidate Labs (active + capacity ≥ required + required software/equipment/type present)" - i.e. prefiltering by the same conditions the hard constraints check. Phase 10 deliberately did **not** implement it that way (PART 9/10/24 of the Phase 10 brief): prefiltering by capacity/software/type would duplicate HC-07/08/10's own logic in a second place, risking Phase 9 and Phase 10 silently disagreeing, and would make a rejected lab's reason unrecoverable (a prefiltered-out lab never becomes a candidate at all, so there is no `ConstraintViolation` to show a CR later explaining "why isn't C-304 in the list"). `CandidateGenerator` generates from every lab and lets the real `ConstraintEngine` be the sole source of truth for validity - see "Candidate Generation" above and ADR in docs/15-DESIGN-DECISIONS.md. "Remove Invalid Candidates" (the original sketch's next step) is also not a separate step in the real implementation - `CandidateGenerationResult` keeps both `validCandidates()` and `invalidCandidates()` as filtered views, never physically discarding the rejected ones, since Phase 12/13 need them.
 
 ## Multi-Session Automatic Generation (Phase 14) — Pseudocode
 

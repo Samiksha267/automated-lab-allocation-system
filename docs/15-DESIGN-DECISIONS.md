@@ -633,3 +633,41 @@ ADR-style log of significant, hard-to-reverse decisions. Each entry: Context, De
 **Reasons:** This is the direct, architectural fix, not a workaround: PART 2 of this phase's brief already required that "constraints do not throw normal business-validation exceptions for expected invalid candidates" - the original implementation violated that rule in spirit even though it looked compliant (catching the exception locally), and this manual-verification finding is what surfaced the violation concretely. The general lesson (documented in docs/14-INTERVIEW-PREPARATION.md Problem 4): catching an exception thrown by another `@Transactional`-advised bean method does not undo the transactional marker Spring's AOP layer already set at the point the exception left that method.
 
 **Trade-offs:** None - `getCurrentAssignment` already existed for `GET /api/cr-assignments/me` (Phase 4), so this is pure reuse, not new surface area.
+
+---
+
+## ADR-046: `CandidateGenerator` Generates From Every Lab — No Capacity/Software/Type Prefilter
+
+**Context:** The Phase 1 sketch of the scheduling pipeline (docs/05-SCHEDULING-ENGINE.md) originally described a "Generate Candidate Labs" step that prefiltered by capacity, required software, and lab type *before* hard-constraint validation. Phase 10 needed to decide whether to implement that prefilter or generate unconditionally and let `ConstraintEngine` (Phase 9) be the sole validity authority.
+
+**Decision:** `CandidateGenerator` queries every lab in the system (`LabRepository.findAll`, ordered by code) and builds a `CandidateAllocation` for each one, unconditionally - no capacity/software/equipment/type/availability conditional exists anywhere in `CandidateGenerator` itself.
+
+**Alternatives:** Prefiltering by capacity/software/type (the original sketch) was rejected - it would duplicate HC-07/HC-08/HC-10's own logic in a second location, creating a real risk of Phase 9 and Phase 10 silently disagreeing about validity as either evolves independently. It would also make a prefiltered-out lab's rejection unexplainable: a lab excluded before `ConstraintEngine` ever sees it produces no `ConstraintViolation` for Phase 12/13 to read later - the CR would simply never learn *why* C-304 isn't in their results.
+
+**Reasons:** "Which labs should be considered" and "is a considered lab valid" are different questions with different owners (PART 2 of the Phase 10 brief) - conflating them by prefiltering would blur that boundary. At the current ~15-16 lab scale, generating unconditionally costs nothing meaningful (verified live: one full generation run across 16 labs completes in well under a second).
+
+**Trade-offs:** More total constraint evaluations than a prefiltered approach would produce (every lab is fully evaluated, not just plausible ones) - accepted as negligible at this scale; a future phase could reintroduce a *safe* prefilter (PART 11 of the brief explicitly allows this) if evidence of a real performance problem ever emerges, but none exists today.
+
+---
+
+## ADR-047: Invalid Candidates Are Preserved, Never Discarded, Inside `CandidateGenerationResult`
+
+**Context:** `CandidateGenerationResult` could have been designed to return only the valid candidates (discarding rejected ones after generation), or to retain every evaluated candidate regardless of outcome.
+
+**Decision:** `CandidateGenerationResult` holds every `EvaluatedCandidate` from the run; `validCandidates()`/`invalidCandidates()` are computed, filtered views over the same underlying list, not two separately-populated collections.
+
+**Reasons:** Phase 12 (explainability) and Phase 13 (alternative suggestions) both need a rejected candidate's full `ConstraintViolation` list later - discarding invalid candidates now would force either re-running generation (wasted work, and a second chance for results to drift between runs) or duplicating violation data into some other structure. Keeping one list with computed views is simpler than either.
+
+**Trade-offs:** `CandidateGenerationResult` holds slightly more data in memory than a valid-only design would (all ~15-16 candidates' `ConstraintEvaluation`s, not just the valid subset) - negligible at this project's scale.
+
+---
+
+## ADR-048: `CandidateGenerator` Is a `@Service`, Not an Interface
+
+**Context:** PART 34 of the Phase 10 brief raised the question of whether `CandidateGenerator` should be an interface (like `SchedulingConstraint`) or a concrete class.
+
+**Decision:** A concrete `@Service` class, no interface.
+
+**Reasons:** `SchedulingConstraint` is an interface because it has twelve real implementations dispatched over polymorphically by `ConstraintEngine` - genuine value from the abstraction. `CandidateGenerator` has exactly one implementation and no dispatch requirement, the same situation `SchedulingContextFactory` and `CandidateAllocationFactory` (Phase 8/9) were already in as concrete classes. Adding an interface here would be ceremony with no consumer, which this project's working rules explicitly discourage (PART 34: "do not create interfaces solely for ceremony").
+
+**Trade-offs:** None significant - if a second implementation is ever genuinely needed (e.g. a caching or bulk-optimized variant), extracting an interface at that point is a small, mechanical refactor with no design cost paid today for a need that may never arrive.

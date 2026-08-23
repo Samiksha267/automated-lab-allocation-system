@@ -51,6 +51,27 @@ No test result is ever claimed without actually running the suite (project worki
 
 **Manually verified against the Dockerized stack (2026-08-22):** all 8 of the phase brief's required scenarios (A–H — lab creation, unauthorized mutation, invalid capacity, duplicate code, Cloudera filter, capacity filter, combined filter, invalid unavailability interval) executed with real `curl` requests against the running containers, plus a restart-and-recount idempotency check on the dev seed data (15 labs → 16 after one test-created lab, software/lab_software/lab_equipment row counts unchanged across the restart).
 
+## Candidate Generation Tests — Implemented (Phase 10)
+
+| Test | Class | What it proves |
+|---|---|---|
+| Context is built exactly once regardless of lab count | `CandidateGeneratorTest` | `SchedulingContextFactory.build` is called once per `generate(...)` call, never once per lab |
+| All labs are evaluated, no first-fit short circuit | `CandidateGeneratorTest` | `ConstraintEngine.evaluate` is called once per lab (3 labs → 3 calls) even when an earlier candidate is valid |
+| Valid and invalid candidates are separated; invalid ones retain violations | `CandidateGeneratorTest` | `validCount()`/`invalidCount()` correctly partition a mixed fixture; every invalid candidate still carries its `ConstraintViolation`s |
+| Zero valid candidates is a normal result, not an exception | `CandidateGeneratorTest` | All-invalid fixture completes normally with an empty `validCandidates()` |
+| All valid candidates still produces no winner | `CandidateGeneratorTest` | An all-valid fixture has no score/ranking field anywhere on the result - selecting one is structurally impossible, not merely undone |
+| Deterministic order requested from the repository (lab code ascending) | `CandidateGeneratorTest` | `LabRepository.findAll(Sort)` is called with `Sort.by(ASC, "code")`, not left to default row order |
+| Multiple violations on one candidate are preserved | `CandidateGeneratorTest` | A candidate failing two constraints retains both `ConstraintViolation`s, not just the first |
+| No duplicate labs in one generation run | `CandidateGeneratorTest` | Evaluated candidates' lab ids are all distinct |
+| BDA/Cloudera: non-Cloudera lab generated and specifically rejected `SOFTWARE_MISMATCH` | `CandidateGeneratorIT` (Testcontainers, environment-blocked here) | Real subject-requirement + lab-capability data combine through the real engine, not a prefilter |
+| Under-capacity lab generated then rejected by `CAPACITY_VIOLATION` | `CandidateGeneratorIT` | Capacity filtering is not duplicated in the generator |
+| Existing `Allocation` on an otherwise-valid lab generated then rejected `LAB_CONFLICT` | `CandidateGeneratorIT` | Conflict detection happens through the real engine against real persisted data |
+| Temporarily unavailable lab generated then rejected `LAB_UNAVAILABLE` | `CandidateGeneratorIT` | Same, for HC-06 |
+| All labs invalid still completes normally | `CandidateGeneratorIT` | Real-data equivalent of the zero-valid unit test |
+| A1 existing does not eliminate every lab for A2's own candidate generation | `CandidateGeneratorIT` | The project's signature scenario, proven at the generation layer against real persisted data |
+
+**Manually verified against the Dockerized stack (2026-08-23), via a temporary `@Profile("dev")`-only `ApplicationRunner` deleted after use (no production candidate-search API was added just to test this):** basic generation produced exactly one candidate per lab in the system (16/16, no first-fit); BDA's non-Cloudera lab (C-304) generated and specifically rejected `SOFTWARE_MISMATCH`; a BATCH-targeted request's capacity check correctly compared against the *batch's* strength and a DIVISION-targeted request against the *division's* strength on the same lab (B-201); a temporary `Allocation` and a temporary `LabUnavailability`, each placed on an otherwise-valid lab, each flipped that one candidate to invalid on regeneration and were then removed, restoring validity; temporarily inflating a batch's required strength drove every lab invalid at once without generation throwing; and the A1/A2 scenario held at the generation layer with a real, persisted A1 allocation in place. All mutations/temporary rows were confirmed reverted/deleted afterward via direct `psql` query. Regression re-verified: all Phase 3-9 endpoints still `200`; `/api/allocations` still `404`; Flyway still at schema version 10.
+
 ## Constraint Engine Tests — Implemented (Phase 9)
 
 ### HC → Test Traceability Matrix

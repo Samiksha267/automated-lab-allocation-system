@@ -2,7 +2,7 @@
 
 Requirement IDs are stable identifiers for traceability to tests (unit/integration test names should reference the FR/NFR/HC ID they cover where practical). Hard scheduling constraints (HC-01..HC-12) are specified and, as of Phase 9, fully implemented in [06-CONSTRAINTS.md](06-CONSTRAINTS.md); they are cross-referenced here.
 
-**Status:** Requirements marked ✅ are implemented and verified as of Phase 9. Requirements marked **(partial)** have their underlying hard-constraint logic implemented and verified (the `ConstraintEngine`, Phase 9) but are not yet reachable through any end-user workflow — the CR-facing booking flow (Phase 15) and PDF import (Phase 19) that will actually call it don't exist yet. Everything else remains planned.
+**Status:** Requirements marked ✅ are implemented and verified as of Phase 10. Requirements marked **(partial)** have their underlying hard-constraint logic and/or candidate generation implemented and verified (the `ConstraintEngine`, Phase 9; `CandidateGenerator`, Phase 10) but are not yet reachable through any end-user workflow — the CR-facing booking flow (Phase 15) and PDF import (Phase 19) that will actually call it don't exist yet. Everything else remains planned.
 
 ## Functional Requirements
 
@@ -31,8 +31,8 @@ Requirement IDs are stable identifiers for traceability to tests (unit/integrati
 - **FR-16** The system detects conflicts (per HC-01..HC-12) among imported entries and against existing allocations during review, before approval is possible. *(The underlying HC-01..HC-12 evaluation itself is now fully implemented and verified — `ConstraintEngine`, Phase 9 — ready for this workflow to call once PDF import exists; the import workflow itself is Phase 19.)*
 
 ### Extra / Makeup Lab Booking (CR Workflow)
-- **FR-17** A CR can search for candidate labs for a subject/batch/date/time, restricted to their own division. *(Candidate generation itself is Phase 10 — not yet implemented.)*
-- **FR-18** The system filters candidate labs by the subject's software/equipment/lab-type requirements before further validation. *(partial)* ✅ The filtering logic exists and is verified (HC-08/09/10, Phase 9) but is not yet wired into any candidate-generation loop (Phase 10).
+- **FR-17** *(partial)* ✅ A CR can search for candidate labs for a subject/batch/date/time, restricted to their own division. *(Candidate generation — `CandidateGenerator`, Phase 10 — is implemented and verified: every lab in the system is generated and evaluated for a given `SchedulingRequest`. Division-restriction to "their own division" is HC-11's job (Phase 9, applicability-gated on the actor), already implemented; only the CR-facing search endpoint itself does not yet exist — Phase 15.)*
+- **FR-18** *(partial)* ✅ The system filters candidate labs by the subject's software/equipment/lab-type requirements before further validation. *(The underlying logic — HC-08/09/10, Phase 9 — is now demonstrably wired into candidate generation: `CandidateGenerator` (Phase 10) evaluates every lab through the real `ConstraintEngine`, verified live with the actual BDA/Cloudera demo. "Filters" here means "correctly rejects with an explainable violation," not "silently excludes" — see docs/05-SCHEDULING-ENGINE.md for why prefiltering was deliberately rejected.)*
 - **FR-19** *(partial)* ✅ The system prevents faculty conflicts: a faculty member cannot be assigned two overlapping sessions. *(`FacultyConflictConstraint`, HC-02, Phase 9 — implemented and verified, both unit and live in Docker; not yet reachable through the booking workflow itself.)*
 - **FR-20** *(partial)* ✅ The system prevents lab conflicts: a lab cannot host two overlapping sessions. *(`LabConflictConstraint`, HC-01, Phase 9 — same status as FR-19.)*
 - **FR-21** *(partial)* ✅ The system considers faculty availability windows; a session outside a faculty's declared availability is rejected. *(`FacultyAvailabilityConstraint`, HC-03, Phase 9.)*
