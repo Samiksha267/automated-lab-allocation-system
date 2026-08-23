@@ -438,6 +438,8 @@ flowchart LR
 
 Phase 6 never writes to `lab_software`/`lab_equipment`/`lab.lab_type_id` (Phase 5's tables); Phase 5 never writes to `subject_software_requirement`/`subject_equipment_requirement`/`subject.required_lab_type_id` (Phase 6's columns). Each phase's manual Docker verification deliberately queried *both* sides independently (`GET /api/subjects/{id}/requirements` and `GET /api/labs?software=CLOUDERA` as two separate, uncombined facts) specifically to keep this separation honest, not just documented.
 
+**Update (Phase 9):** the diagram above reflects this section's original Phase 6 state. `RequiredSoftwareConstraint`/`RequiredEquipmentConstraint`/`RequiredLabTypeConstraint` now exist and do the comparison this diagram calls "not yet compared" — see §17 below and docs/06-CONSTRAINTS.md HC-08/09/10.
+
 ### New backend additions (Phase 6)
 
 ```
@@ -484,7 +486,7 @@ flowchart LR
     FC -->|"HC-02 - is the faculty already occupied by a real booking?"| Decision
 ```
 
-A faculty can be generally *available* (HC-03) at a time they are already *booked* (HC-02) — availability is a static weekly boundary the faculty declares in advance; conflict depends on real allocation data that doesn't exist until Phase 9+. Phase 7 only implements the availability layer's data and evaluation logic.
+A faculty can be generally *available* (HC-03) at a time they are already *booked* (HC-02) — availability is a static weekly boundary the faculty declares in advance; conflict depends on real allocation data. Phase 7 implemented the availability layer's data and evaluation logic; Phase 9 (§17 below) implemented both `FacultyAvailabilityConstraint` and `FacultyConflictConstraint` as real, independently-tested `SchedulingConstraint` classes, verified with a dedicated test proving they can disagree for the identical candidate (available but conflicted).
 
 ### New backend additions (Phase 7)
 
@@ -570,4 +572,67 @@ Flyway migrated to v10 cleanly; `DevScheduleVersionSeeder` created one `PUBLISHE
 
 ### Deviations from the Phase 1 plan
 
-None of substance to the schema itself — `Allocation`/`ScheduleVersion`'s fields, invariants, and lifecycle match what docs/04-DATABASE-DESIGN.md §7 and ADR-005/ADR-009 already specified. The one real addition beyond the Phase 1 draft is the college-timezone bridge (`SchedulingTimeMapper`, `app.college.time-zone`) — the Phase 1 plan never anticipated the `LocalDate`/`LocalTime` (Allocation) vs. `TIMESTAMPTZ`/`Instant` (LabUnavailability, Phase 5) type boundary that HC-06 will need to cross in Phase 9; resolving it now (rather than leaving every future constraint to solve it independently) is a deliberate, documented addition — see ADR-037.
+None of substance to the schema itself — `Allocation`/`ScheduleVersion`'s fields, invariants, and lifecycle match what docs/04-DATABASE-DESIGN.md §7 and ADR-005/ADR-009 already specified. The one real addition beyond the Phase 1 draft is the college-timezone bridge (`SchedulingTimeMapper`, `app.college.time-zone`) — the Phase 1 plan never anticipated the `LocalDate`/`LocalTime` (Allocation) vs. `TIMESTAMPTZ`/`Instant` (LabUnavailability, Phase 5) type boundary that HC-06 needed to cross; resolving it in Phase 8 (rather than leaving every future constraint to solve it independently) is a deliberate, documented addition — see ADR-037.
+
+## 17. Phase 9 — Constraint Engine (implemented)
+
+### Pipeline
+
+```mermaid
+flowchart TD
+    Req[SchedulingRequest] --> Ctx[SchedulingContext<br/>via SchedulingContextFactory]
+    Ctx --> Cand[CandidateAllocation<br/>via CandidateAllocationFactory]
+    Cand --> Engine[ConstraintEngine.evaluate]
+    Engine --> HC12[HC-12 Academic Relationship]
+    Engine --> HC07[HC-07 Capacity]
+    Engine --> HC08[HC-08 Required Software]
+    Engine --> HC09[HC-09 Required Equipment]
+    Engine --> HC10[HC-10 Required Lab Type]
+    Engine --> HC03[HC-03 Faculty Availability]
+    Engine --> HC06[HC-06 Lab Availability]
+    Engine --> HC01[HC-01 Lab Conflict]
+    Engine --> HC02[HC-02 Faculty Conflict]
+    Engine --> HC04[HC-04 Batch Conflict]
+    Engine --> HC05[HC-05 Division-Wide Conflict]
+    Engine --> HC11[HC-11 CR Authorization]
+    HC12 & HC07 & HC08 & HC09 & HC10 & HC03 & HC06 & HC01 & HC02 & HC04 & HC05 & HC11 --> Eval[ConstraintEvaluation<br/>valid + all results + all violations]
+```
+
+All twelve constraints run for every candidate (no fail-fast) - see docs/06-CONSTRAINTS.md for each HC's class, logic, and error code, and docs/05-SCHEDULING-ENGINE.md for the engine's own architecture notes (context reuse, applicability, deterministic ordering).
+
+### New backend additions (Phase 9)
+
+```
+com.college.laballocation.scheduling/     + ConstraintOutcome (enum: PASS/FAIL/NOT_APPLICABLE)
+                                             ConstraintResult, CandidateAllocation, SchedulingRequest, SchedulingRefs
+                                               (all extended - see docs/05-SCHEDULING-ENGINE.md)
+                                             SchedulingActor (userId + UserRole, nullable on SchedulingRequest)
+                                             CandidateAllocationFactory (builds one candidate's LabRef snapshot)
+com.college.laballocation.scheduling.constraint/   SchedulingConstraint (interface)
+                                                    ConstraintEngine, ConstraintEvaluation
+                                                    LabConflictConstraint, FacultyConflictConstraint,
+                                                      FacultyAvailabilityConstraint, BatchConflictConstraint,
+                                                      DivisionWideConflictConstraint, LabAvailabilityConstraint,
+                                                      CapacityConstraint, RequiredSoftwareConstraint,
+                                                      RequiredEquipmentConstraint, RequiredLabTypeConstraint,
+                                                      CrAuthorizationConstraint, AcademicRelationshipConstraint
+com.college.laballocation.common/         TimeIntervalUtils gained an Instant overload of overlaps(...)
+```
+
+No new migration - Phase 9 is entirely code against the Phase 8 schema, confirmed live: Flyway remained at schema version 10 after this phase's work.
+
+### No production Allocation-creation API (still, PART 31/65 of the phase brief)
+
+Still true after Phase 9: `POST /api/allocations` and `GET /api/allocations` both return `404`. A temporary, `@Profile("dev")`-only `ApplicationRunner` (`DevConstraintEngineVerificationRunner`) was used to exercise the real, Spring-assembled `ConstraintEngine` against real dev-seeded data over the live Docker/Postgres stack for manual verification (Testcontainers remains environment-blocked here) - it created and cleaned up its own temporary rows (a test `Allocation`, a `LabUnavailability`, a `SubjectEquipmentRequirement`, and a temporary required-lab-type flip on BDA, all reverted/deleted within the same run) and was deleted from the codebase once verification was recorded, per the phase brief's explicit instruction not to leave a diagnostic harness behind.
+
+### A real bug found and fixed: exception-across-transaction-boundary in HC-11
+
+The first `CrAuthorizationConstraint` called `CrOwnershipService.requireOwnsDivision(...)` and caught its thrown `ApiException` subtypes to build a `FAIL` `ConstraintResult` - consistent-looking with "represent expected failure as a result, not an exception" until manual Docker verification actually exercised the unauthorized-CR scenario and the whole request failed with `UnexpectedRollbackException`. Root cause: `requireOwnsDivision` is itself `@Transactional`: Spring's transaction interceptor marks the *shared* surrounding transaction rollback-only the moment the exception crosses that method's boundary - before this constraint's own catch block ever runs. Catching the exception in Java code did not undo the transactional marker. Fix: switched to `CrOwnershipService.getCurrentAssignment(userId)` (`Optional`-returning, never throws) and compared the division directly - no exception crosses any `@Transactional` boundary for this expected-failure path at all now. See docs/14-INTERVIEW-PREPARATION.md and docs/06-CONSTRAINTS.md HC-11 for the full account, and docs/15-DESIGN-DECISIONS.md for the resulting ADR.
+
+### Verified end-to-end (Dockerized, 2026-08-23)
+
+All sixteen of the phase brief's required manual scenarios executed against the real Spring-assembled `ConstraintEngine` over live Docker/Postgres using the real seeded demo data (BDA/CNS, Faculty BDA/CNS, labs B-301/C-202/C-304/B-201/C-101, Cloudera): valid A1/A2 simultaneous batches (zero violations); same-lab, same-faculty, same-batch, and division-wide conflicts each correctly rejected; faculty-unavailable and lab-temporarily-unavailable each correctly rejected; BDA/Cloudera pass vs. BDA/no-Cloudera fail; equipment-quantity pass/fail; required-lab-type pass/fail plus the mandatory preferred-only-never-fails-HC-10 check (isolated at the per-constraint result level, since the chosen demo lab also lacked Cloudera for an unrelated reason); invalid academic relationship rejected; unauthorized CR context rejected (`CR_ASSIGNMENT_NOT_FOUND`); and a multi-failure candidate returned two simultaneous violations together (software + faculty availability), proving the engine does not fail fast. All sixteen scenarios' actual results matched their expected validity. Confirmed via `psql` after the run that every temporary row the verification harness created was cleaned up (zero leftover allocations, unavailability rows, or equipment requirements). Regression re-verified: `/api/auth/me`, `/api/programs`, `/api/labs`, `/api/subjects/{id}/requirements`, `/api/faculty/{id}/availability` all still 200; `/api/allocations` still 404 both before and after.
+
+### Deviations from the Phase 1 plan
+
+None to the constraint *rules* themselves - every HC-01..HC-12 implementation matches docs/06-CONSTRAINTS.md's Phase 1-through-6 specification exactly. Two real, deliberate additions beyond the original plan, both because manual Docker verification surfaced a genuine need: `ConstraintOutcome`'s three-way PASS/FAIL/NOT_APPLICABLE split (Phase 1 never anticipated a constraint being inapplicable rather than satisfied) and the `CrOwnershipService.getCurrentAssignment`-over-`requireOwnsDivision` fix described above (an implementation detail invisible to the constraint *specification*, but a real architectural lesson about exceptions and Spring transaction boundaries).

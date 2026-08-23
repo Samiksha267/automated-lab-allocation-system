@@ -56,11 +56,16 @@ class SchedulingContextFactoryTest {
         }
     }
 
-    private Division division() {
+    private AcademicYear sharedAcademicYear() {
         Program program = new Program("BTECH", "B.Tech", 4);
         Stream stream = new Stream(program, "CS", "Computer Science");
         AcademicYear year = new AcademicYear(stream, 3);
-        Division division = new Division(year, "A", 68);
+        setId(year, 10L);
+        return year;
+    }
+
+    private Division division() {
+        Division division = new Division(sharedAcademicYear(), "A", 68);
         setId(division, 1L);
         return division;
     }
@@ -72,10 +77,7 @@ class SchedulingContextFactoryTest {
     }
 
     private Subject subject() {
-        Program program = new Program("BTECH", "B.Tech", 4);
-        Stream stream = new Stream(program, "CS", "Computer Science");
-        AcademicYear year = new AcademicYear(stream, 3);
-        Subject subject = new Subject(year, "BDA", "Big Data Analytics");
+        Subject subject = new Subject(sharedAcademicYear(), "BDA", "Big Data Analytics");
         setId(subject, 3L);
         return subject;
     }
@@ -97,7 +99,7 @@ class SchedulingContextFactoryTest {
         Batch batch = batch(division);
         SchedulingRequest request = new SchedulingRequest(
                 AllocationType.EXTRA, TargetType.BATCH, division.getId(), batch.getId(), 3L, 4L, 5L,
-                LocalDate.of(2026, 8, 24), LocalTime.of(9, 0), LocalTime.of(11, 0));
+                LocalDate.of(2026, 8, 24), LocalTime.of(9, 0), LocalTime.of(11, 0), null);
 
         when(subjectService.getEntity(3L)).thenReturn(subject());
         when(facultyService.getEntity(4L)).thenReturn(faculty());
@@ -114,6 +116,8 @@ class SchedulingContextFactoryTest {
         assertThat(context.division().id()).isEqualTo(1L);
         assertThat(context.subject().code()).isEqualTo("BDA");
         assertThat(context.faculty().employeeCode()).isEqualTo("FAC-BDA");
+        assertThat(context.subject().academicYearId()).isEqualTo(context.division().academicYearId());
+        assertThat(context.subject().requiredLabTypeId()).isNull();
         verify(allocationQueryService).findActiveForBatch(2L, request.allocationDate());
     }
 
@@ -122,7 +126,7 @@ class SchedulingContextFactoryTest {
         Division division = division();
         SchedulingRequest request = new SchedulingRequest(
                 AllocationType.REGULAR, TargetType.DIVISION, division.getId(), null, 3L, 4L, 5L,
-                LocalDate.of(2026, 8, 24), LocalTime.of(9, 0), LocalTime.of(11, 0));
+                LocalDate.of(2026, 8, 24), LocalTime.of(9, 0), LocalTime.of(11, 0), null);
 
         when(subjectService.getEntity(3L)).thenReturn(subject());
         when(facultyService.getEntity(4L)).thenReturn(faculty());

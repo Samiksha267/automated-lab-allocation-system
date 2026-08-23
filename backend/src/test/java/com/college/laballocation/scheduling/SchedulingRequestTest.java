@@ -1,9 +1,11 @@
 package com.college.laballocation.scheduling;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.college.laballocation.common.ApiException;
+import com.college.laballocation.user.UserRole;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import org.junit.jupiter.api.Test;
@@ -13,7 +15,7 @@ class SchedulingRequestTest {
 
     private static SchedulingRequest request(TargetType targetType, Long batchId, LocalTime start, LocalTime end) {
         return new SchedulingRequest(
-                AllocationType.EXTRA, targetType, 1L, batchId, 2L, 3L, 4L, LocalDate.of(2026, 8, 24), start, end);
+                AllocationType.EXTRA, targetType, 1L, batchId, 2L, 3L, 4L, LocalDate.of(2026, 8, 24), start, end, null);
     }
 
     @Test
@@ -47,5 +49,20 @@ class SchedulingRequestTest {
     void validDivisionRequestIsAccepted() {
         assertThatCode(() -> request(TargetType.DIVISION, null, LocalTime.of(9, 0), LocalTime.of(11, 0)))
                 .doesNotThrowAnyException();
+    }
+
+    @Test
+    void nullActorIsAccepted() {
+        SchedulingRequest r = request(TargetType.DIVISION, null, LocalTime.of(9, 0), LocalTime.of(11, 0));
+        assertThat(r.actor()).isNull();
+    }
+
+    @Test
+    void nonNullActorIsCarriedThrough() {
+        SchedulingActor actor = new SchedulingActor(99L, UserRole.CR);
+        SchedulingRequest r = new SchedulingRequest(
+                AllocationType.EXTRA, TargetType.BATCH, 1L, 5L, 2L, 3L, 4L,
+                LocalDate.of(2026, 8, 24), LocalTime.of(9, 0), LocalTime.of(11, 0), actor);
+        assertThat(r.actor()).isEqualTo(actor);
     }
 }

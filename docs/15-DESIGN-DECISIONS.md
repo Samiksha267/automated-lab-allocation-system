@@ -565,3 +565,71 @@ ADR-style log of significant, hard-to-reverse decisions. Each entry: Context, De
 **Reasons:** A partial unique index is the cheapest possible database-level guarantee for this specific invariant — it costs one small index and is verified directly: a second `PUBLISHED` row insert for the same term was rejected by Postgres in a live transactional test (docs/11-TESTING-STRATEGY.md).
 
 **Trade-offs:** None significant — this mirrors the exact pattern already used for `subject`'s required/preferred lab-type mutual exclusivity (ADR-028) and `cr_assignment`'s at-most-one-active-per-division/user partial indexes (Phase 4).
+
+---
+
+## ADR-041: One `SchedulingConstraint` Class Per Hard Constraint, Spring-Discovered
+
+**Context:** HC-01 through HC-12 needed an implementation strategy. A single method (or class) branching over all twelve rules was one option; twelve independently-testable classes implementing a shared interface was the other.
+
+**Decision:** `SchedulingConstraint` (interface: `id()`, `evaluate(context, candidate)`) with one `@Component` implementation per HC. `ConstraintEngine` receives `List<SchedulingConstraint>` via Spring constructor injection (auto-discovered, no manual wiring) and sorts it into a fixed evaluation order.
+
+**Alternatives:** A single `AllocationValidator.validate(...)` method with twelve inline checks was rejected — it would couple unrelated rules in one function (a capacity-logic change risking a software-logic regression in the same method), make isolated unit testing of one rule impossible without exercising all twelve, and require editing a shared method (merge-conflict risk) every time a future constraint is added.
+
+**Reasons:** Twelve independent classes mean twelve independent test classes (docs/11-TESTING-STRATEGY.md), and Spring's auto-discovery means adding HC-13 later is purely additive - a new `@Component`, zero changes to `ConstraintEngine` itself.
+
+**Trade-offs:** Slightly more boilerplate (twelve small files vs. one) - accepted; this project consistently favors explicit, separately-testable units over compact-but-coupled code (the same reasoning behind `LabSoftware`/`LabEquipment` as explicit entities rather than implicit joins, ADR-021).
+
+---
+
+## ADR-042: Evaluate All Constraints, Never Fail-Fast
+
+**Context:** `ConstraintEngine.evaluate(...)` could stop at the first failing constraint (cheaper) or run every constraint regardless of earlier failures (more expensive per-candidate, more informative).
+
+**Decision:** Every registered constraint always runs; `ConstraintEvaluation` collects every result and every violation, not just the first.
+
+**Reasons:** A candidate can be simultaneously invalid for unrelated reasons (wrong capacity *and* missing software *and* faculty unavailable) - reporting only the first discovered reason is worse for the Lab Assistant/CR trying to understand why a request failed, and would require re-running the engine to discover the *next* reason after fixing the first. This also directly feeds Phase 12 (full explanation) and Phase 13 (alternative ranking) without a second evaluation pass. Verified with a dedicated multi-failure test (a fixture failing three constraints at once, asserting all three violations are present) and live in Docker.
+
+**Trade-offs:** Marginally more work per candidate (twelve checks always run, not an early subset) - accepted as negligible at this project's scale (~15 labs, one candidate evaluated at a time in Phase 9; Phase 25 will benchmark formally if this ever needs revisiting for Phase 10's candidate-generation loop).
+
+---
+
+## ADR-043: `ConstraintResult` Gains a Third Outcome — `NOT_APPLICABLE`, Distinct from `PASS`
+
+**Context:** HC-11 (CR Authorization) is meaningless for a `SchedulingRequest` with no CR actor at all (e.g. future automated REGULAR generation, Phase 14) or for a `LAB_ASSISTANT` actor - forcing it to report `PASS` in that case would be a category error: the rule was never actually evaluated, not satisfied.
+
+**Decision:** `ConstraintOutcome` (`PASS`/`FAIL`/`NOT_APPLICABLE`) replaces Phase 8's plain `boolean passed` field on `ConstraintResult`. `NOT_APPLICABLE` counts as non-failing for overall `ConstraintEvaluation.valid()`, but is reported distinctly in `results()`.
+
+**Alternatives:** Reporting `NOT_APPLICABLE` cases as `PASS` was rejected - it would silently conflate "this candidate is authorized" with "authorization doesn't apply here," a distinction future explainability (Phase 12, "why was this valid") may genuinely need to render correctly (e.g. never claiming "CR authorization passed" for a request that had no CR actor at all).
+
+**Reasons:** No other HC currently needs a third state (HC-04's vacuous DIVISION-candidate pass and HC-08/09's empty-requirement pass are both genuinely, truthfully `PASS` - the rule *is* satisfied, trivially - so they deliberately do not use `NOT_APPLICABLE`, keeping its use narrow and meaningful rather than a catch-all).
+
+**Trade-offs:** A breaking change to Phase 8's `ConstraintResult` shape - accepted since nothing outside `ConstraintResult` itself consumed the old shape yet (verified by search before changing it), making this a clean evolution, not a real breaking change to any consumer.
+
+---
+
+## ADR-044: `SchedulingActor` — a Domain-Neutral Actor Field on `SchedulingRequest`, Not an HTTP/Security Dependency
+
+**Context:** HC-11 needs to know who originated a request (to decide whether CR-ownership applies at all). `SchedulingRequest`/`SchedulingContext` are deliberately JPA/HTTP-free domain objects (NFR-08); pulling in Spring Security's `Authentication`/`SecurityContext` would violate that.
+
+**Decision:** `SchedulingActor{userId: Long, role: UserRole}`, a plain record, added as a nullable field on `SchedulingRequest` - resolved by the caller *before* the request is constructed, the same way `facultyId` is already resolved upstream (Phase 8). Reuses `UserRole` (already a plain, framework-free enum) rather than inventing a duplicate role type.
+
+**Alternatives:** Threading a Spring Security `Authentication` object into the scheduling domain was rejected outright - it would make every future consumer of `SchedulingRequest` (Phase 10-19, and any future non-HTTP caller such as a batch import job) carry a web-framework dependency it doesn't need. A separate `SchedulingAuthorizationContext` service call from inside the constraint was also considered and rejected - it would make the constraint responsible for *resolving* identity, not just *checking* it, mixing two different concerns.
+
+**Reasons:** Consistent with the project's existing "resolve ambiguity upstream, hand the constraint engine an unambiguous request" architecture (docs/05-SCHEDULING-ENGINE.md's faculty-resolution note, Phase 8) - actor resolution is exactly the same kind of upstream concern as faculty resolution.
+
+**Trade-offs:** `SchedulingRequest`'s constructor signature changed (test call-sites updated) - a one-time, contained cost, accepted for the same reason ADR-043 accepted its own breaking change.
+
+---
+
+## ADR-045: `CrOwnershipService.getCurrentAssignment` (Non-Throwing), Not `requireOwnsDivision`, Inside `CrAuthorizationConstraint`
+
+**Context:** A real bug, found via manual Docker verification: the first `CrAuthorizationConstraint` called `CrOwnershipService.requireOwnsDivision(...)` and caught its thrown `ApiException` subtypes to build a `FAIL` result. Because `requireOwnsDivision` is itself `@Transactional`, the exception crossing that method's boundary marked the *shared surrounding* transaction rollback-only before the constraint's catch block ran - the enclosing transaction later failed with `UnexpectedRollbackException` even though the constraint itself had already produced a correct result.
+
+**Decision:** `CrAuthorizationConstraint` calls `CrOwnershipService.getCurrentAssignment(userId)` (`Optional<CrAssignment>`, never throws) and compares the resolved division directly - no exception ever crosses a `@Transactional` boundary for this expected-failure path.
+
+**Alternatives:** Keeping `requireOwnsDivision` and instead wrapping the constraint's call in `TransactionTemplate.execute(...)` with `PROPAGATION_REQUIRES_NEW` (a fresh, disposable transaction the exception could freely poison without affecting the caller) was considered and rejected - it would add real transactional-boundary complexity to a single read-only check, purely to keep using a throwing API that already has a non-throwing equivalent doing the same underlying query.
+
+**Reasons:** This is the direct, architectural fix, not a workaround: PART 2 of this phase's brief already required that "constraints do not throw normal business-validation exceptions for expected invalid candidates" - the original implementation violated that rule in spirit even though it looked compliant (catching the exception locally), and this manual-verification finding is what surfaced the violation concretely. The general lesson (documented in docs/14-INTERVIEW-PREPARATION.md Problem 4): catching an exception thrown by another `@Transactional`-advised bean method does not undo the transactional marker Spring's AOP layer already set at the point the exception left that method.
+
+**Trade-offs:** None - `getCurrentAssignment` already existed for `GET /api/cr-assignments/me` (Phase 4), so this is pure reuse, not new surface area.

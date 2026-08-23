@@ -51,6 +51,39 @@ No test result is ever claimed without actually running the suite (project worki
 
 **Manually verified against the Dockerized stack (2026-08-22):** all 8 of the phase brief's required scenarios (A–H — lab creation, unauthorized mutation, invalid capacity, duplicate code, Cloudera filter, capacity filter, combined filter, invalid unavailability interval) executed with real `curl` requests against the running containers, plus a restart-and-recount idempotency check on the dev seed data (15 labs → 16 after one test-created lab, software/lab_software/lab_equipment row counts unchanged across the restart).
 
+## Constraint Engine Tests — Implemented (Phase 9)
+
+### HC → Test Traceability Matrix
+
+| HC | Constraint class | Positive test | Negative test | Edge case | Integration coverage |
+|---|---|---|---|---|---|
+| HC-01 Lab Conflict | `LabConflictConstraint` | No existing allocations → PASS | Overlapping same-lab allocation → FAIL | Back-to-back (no overlap); different-date same-time not treated as conflict; CANCELLED rows never block | `ConstraintEngineIT` (same-lab conflict, end-to-end) |
+| HC-02 Faculty Conflict | `FacultyConflictConstraint` | No existing faculty allocations → PASS | Overlapping allocation, different lab → FAIL | Distinguished from HC-03 in a dedicated combined test | `ConstraintEngineIT` (A1/A2 scenario) |
+| HC-03 Faculty Availability | `FacultyAvailabilityConstraint` | Within declared window → PASS | Outside declared window → FAIL | Day-of-week derived from `allocationDate`, never independently supplied | `ConstraintEngineIT` (A1/A2 scenario) |
+| HC-04 Batch Conflict | `BatchConflictConstraint` | Different batches, same division, simultaneous → PASS | Same batch overlapping → FAIL | DIVISION candidate passes vacuously (no batch) | `ConstraintEngineIT` (A1/A2 scenario) |
+| HC-05 Division-Wide Conflict | `DivisionWideConflictConstraint` | BATCH vs. sibling BATCH → PASS | BATCH vs. DIVISION (both directions), DIVISION vs. DIVISION → FAIL | Different divisions never conflict | Full 6-row matrix unit-tested |
+| HC-06 Lab Availability | `LabAvailabilityConstraint` | No unavailability windows → PASS | Overlapping `lab_unavailability` window → FAIL | Candidate starting exactly when unavailability ends → PASS; permanently inactive lab → FAIL | `ConstraintEngineIT`-adjacent manual Docker scenario |
+| HC-07 Capacity | `CapacityConstraint` | Capacity ≥ required (both BATCH and DIVISION) → PASS | Capacity < required → FAIL | `details` carries exact required/actual capacity | `ConstraintEngineTest` multi-failure fixture |
+| HC-08 Required Software | `RequiredSoftwareConstraint` | Empty requirements; lab has all + extra software → PASS | Missing one of several required items → FAIL | BDA/Cloudera pass and fail, both live in Docker | `ConstraintEngineIT` (Cloudera scenario) |
+| HC-09 Required Equipment | `RequiredEquipmentConstraint` | Empty requirements; quantity ≥ required → PASS | Quantity < required; no association row (0 available) → FAIL | Never a null-pointer failure on a missing association | Manual Docker scenario |
+| HC-10 Required Lab Type | `RequiredLabTypeConstraint` | No required type; matching type → PASS | Mismatched required type → FAIL | Preferred-only type never fails HC-10 (mandatory test) | Manual Docker scenario, isolated at the per-constraint-result level |
+| HC-11 CR Authorization | `CrAuthorizationConstraint` | CR owning the division → PASS | CR not owning / no assignment → FAIL | No actor / LAB_ASSISTANT actor → `NOT_APPLICABLE`; STUDENT actor defensively FAIL | Manual Docker scenario |
+| HC-12 Academic Relationship | `AcademicRelationshipConstraint` | Coherent batch/division/subject/faculty → PASS | Batch-division mismatch, subject-year mismatch, no/wrong faculty assignment → FAIL | Three sub-checks, first-failure-wins internally | `ConstraintEngineIT`, manual Docker scenario |
+
+### Engine-Level Tests (`ConstraintEngineTest`)
+
+| Test | What it proves |
+|---|---|
+| Results returned in the documented deterministic order regardless of constraint injection order | `ConstraintEngine`'s own sort produces the stable order, not Spring's bean-discovery order (constraints shuffled with a fixed seed before registration) |
+| A1/A2 (different batches, same division, simultaneous) is fully valid | The signature "not a CRUD app" scenario — zero violations, all applicable HC-01/02/03/04/05 individually confirmed PASS |
+| A candidate failing capacity + software + faculty availability simultaneously returns all three violations | All-results evaluation, not fail-fast — proven with a controlled fixture (not just documentation) |
+
+### Integration Test (`ConstraintEngineIT`, Testcontainers, environment-blocked here)
+
+Real repository-backed data via `SchedulingContextFactory`/`CandidateAllocationFactory`/the real Spring-wired `ConstraintEngine` (all twelve `@Component` constraints auto-discovered): the A1/A2 valid scenario, a same-lab-conflict scenario, and the BDA/Cloudera pass-vs-fail scenario, all against a real PostgreSQL instance. Written correctly for CI/future environments; manual Docker verification (below) covers what this cannot run here.
+
+**Manually verified against the Dockerized stack (2026-08-23), via a temporary `@Profile("dev")`-only `ApplicationRunner` deleted after use (no production allocation-creation API was added just to test this):** all 16 of the phase brief's required scenarios executed against the real `ConstraintEngine` and real seeded demo data — valid A1/A2 (zero violations); same-lab/same-faculty/same-batch/division-wide conflicts each rejected; faculty-unavailable and lab-temporarily-unavailable each rejected; BDA/Cloudera pass vs. no-Cloudera fail; equipment-quantity pass/fail; required-lab-type pass/fail plus preferred-only-never-fails-HC-10; invalid academic relationship rejected; unauthorized CR context rejected; and a multi-failure candidate returned two simultaneous violations together. All 16 expected-vs-actual validity results matched. All temporary rows the harness created (a test allocation, a lab-unavailability window, an equipment requirement, a temporary lab-type flip) were confirmed cleaned up afterward via direct `psql` query. Regression re-verified: all Phase 3-8 endpoints still `200`; `/api/allocations` still `404`.
+
 ## Scheduling Domain & Allocation Persistence Tests — Implemented (Phase 8)
 
 | Test | Class | What it proves |

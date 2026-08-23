@@ -61,12 +61,16 @@ public class SchedulingContextFactory {
         List<ExistingAllocationSnapshot> divisionAllocations = snapshot(
                 allocationQueryService.findActiveForDivision(division.getId(), request.allocationDate()));
 
+        Long requiredLabTypeId = subject.getRequiredLabType() != null ? subject.getRequiredLabType().getId() : null;
+
         return new SchedulingContext(
                 request,
-                new SubjectRef(subject.getId(), subject.getCode(), subject.getName()),
+                new SubjectRef(subject.getId(), subject.getCode(), subject.getName(), subject.getAcademicYear().getId(), requiredLabTypeId),
                 new FacultyRef(faculty.getId(), faculty.getEmployeeCode(), faculty.getName(), faculty.isActive()),
-                new DivisionRef(division.getId(), division.getCode(), division.getStrength()),
-                batch == null ? null : new BatchRef(batch.getId(), batch.getCode(), batch.getStrength(), batch.getDivision().getId()),
+                new DivisionRef(division.getId(), division.getCode(), division.getStrength(), division.getAcademicYear().getId()),
+                batch == null
+                        ? null
+                        : new BatchRef(batch.getId(), batch.getCode(), batch.getStrength(), batch.getDivision().getId()),
                 facultyAllocations,
                 batchAllocations,
                 divisionAllocations);

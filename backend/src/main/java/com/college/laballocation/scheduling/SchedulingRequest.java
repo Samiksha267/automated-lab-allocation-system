@@ -26,6 +26,11 @@ import org.springframework.http.HttpStatus;
  * cross-table "does this batch actually belong to this division" check
  * requires loaded entities and lives on {@link Allocation}'s factory methods
  * instead, once a candidate is actually being persisted.
+ *
+ * <p>{@code actor} (added Phase 9) is likewise resolved before this object
+ * exists - {@code null} means no actor context at all (e.g. automated
+ * REGULAR generation), never guessed or defaulted inside a constraint. See
+ * {@link SchedulingActor} and {@code CrAuthorizationConstraint} (HC-11).
  */
 public record SchedulingRequest(
         AllocationType allocationType,
@@ -37,7 +42,8 @@ public record SchedulingRequest(
         Long academicTermId,
         LocalDate allocationDate,
         LocalTime startTime,
-        LocalTime endTime) {
+        LocalTime endTime,
+        SchedulingActor actor) {
 
     public SchedulingRequest {
         if (targetType == TargetType.BATCH && batchId == null) {
