@@ -51,6 +51,32 @@ No test result is ever claimed without actually running the suite (project worki
 
 **Manually verified against the Dockerized stack (2026-08-22):** all 8 of the phase brief's required scenarios (A–H — lab creation, unauthorized mutation, invalid capacity, duplicate code, Cloudera filter, capacity filter, combined filter, invalid unavailability interval) executed with real `curl` requests against the running containers, plus a restart-and-recount idempotency check on the dev seed data (15 labs → 16 after one test-created lab, software/lab_software/lab_equipment row counts unchanged across the restart).
 
+## Explainable Allocation Tests — Implemented (Phase 12)
+
+| Test | Class | What it proves |
+|---|---|---|
+| Top candidate is recommended, others preserved as "other valid" | `ExplainableAllocationServiceTest` | Highest-ranked `ScoredCandidate` becomes `recommendedCandidate`; the rest appear via `otherValidCandidates()` |
+| Zero valid candidates returns `NO_VALID_CANDIDATE` with null recommendation | `ExplainableAllocationServiceTest` | No exception; a factual summary is produced instead |
+| Invalid candidate appears only in rejected list, never scored | `ExplainableAllocationServiceTest` | `RejectedCandidateExplanation` has no score field at all; the candidate is absent from `rankedValidCandidates` |
+| Multiple violation reasons are all preserved | `ExplainableAllocationServiceTest` | A candidate failing two constraints keeps both `ViolationExplanation`s |
+| Score breakdown preserves exact Phase 11 contribution values | `ExplainableAllocationServiceTest` | `ExplainedValidCandidate.scoreContributions()` equals the original `ScoreContribution` list verbatim |
+| `NOT_APPLICABLE` scoring factor preserved, excluded from applicable max | `ExplainableAllocationServiceTest` | Denominator logic is read from Phase 11, never recomputed here |
+| `NOT_APPLICABLE` constraint (HC-11) never rendered as PASS | `ExplainableAllocationServiceTest` | `ConstraintCheckExplanation.outcome()` stays `NOT_APPLICABLE`, with an accurate (non-recomputed) reason |
+| Tied scores shown as equal, deterministic order only | `ExplainableAllocationServiceTest` | No candidate is described as objectively better on an exact tie |
+| Rejection summary aggregates correctly without overstating candidate count | `ExplainableAllocationServiceTest` | `RejectionSummary.countByErrorCode()` matches per-reason counts; `rejectedCount` stays the real candidate count |
+| One candidate contributes to multiple reason counts; sum can exceed rejected count | `RejectionSummaryTest` | The documented non-additive semantics are enforced, not just described |
+| Empty rejection list produces a zero summary; tied most-common reasons all returned | `RejectionSummaryTest` | Edge cases behave sensibly, no divide-by-zero or arbitrary tie-break |
+| Pairwise comparison identifies which factor explains a ranking difference | `ScoreComparisonTest` | `ScoreComparison.compare(...)` correctly attributes a score gap to `PREFERRED_LAB_TYPE`, not a vague aggregate |
+| Factor `NOT_APPLICABLE` for both candidates is omitted from the comparison | `ScoreComparisonTest` | No meaningless zero-vs-zero diff clutters the comparison |
+| `AllocationRecommendation` invariants: `RECOMMENDED` requires non-null recommendation, `NO_VALID_CANDIDATE` requires null, recommended must be rank 1 | `AllocationRecommendationTest` | Constructor-level defense-in-depth (PART 27) actually rejects invalid construction, not just documents the rule |
+| `otherValidCandidates()` excludes the recommended one | `AllocationRecommendationTest` | The derived view is correct, not a duplicated/stale list |
+| BDA recommendation selects the top-ranked valid lab; C-304 explained with its real rejection reason | `ExplainableAllocationIT` (Testcontainers, environment-blocked here) | Full generate→score→explain pipeline against real persisted data |
+| Invalid-but-preferred-type candidate never outranks a valid one | `ExplainableAllocationIT` | Hard-vs-soft proof against real data |
+| Zero valid candidates produces `NO_VALID_CANDIDATE` | `ExplainableAllocationIT` | Real-data equivalent of the unit-level zero-valid test |
+| Recommendation never changes the `allocation` row count | `ExplainableAllocationIT` | Persistence-safety proof against a real Postgres instance |
+
+**Manually verified against the Dockerized stack (2026-08-23), via a temporary `@Profile("dev")`-only `ApplicationRunner` (`DevExplanationVerificationRunner`) deleted after use (no production recommendation API was added just to test this):** BDA recommendation selected C-202 (rank 1, `39.58/60.0`) with B-201/B-301 preserved as ranked other-valid candidates and C-304 rejected with `SOFTWARE_MISMATCH`, absent from the ranking; a pairwise comparison between C-202 and B-201 correctly attributed the ranking gap to `PREFERRED_LAB_TYPE` (+15) outweighing a `CAPACITY_FIT` deficit (-4.22); temporarily inflating batch A1's strength produced `NO_VALID_CANDIDATE` with a factual, non-exceptional summary; CNS (zero preferences) produced an exact tie between B-202 and D-202, both correctly reported at applicable-max `45.0` (`PREFERRED_LAB_TYPE` `NOT_APPLICABLE`, excluded from the denominator); a real, persisted A1 allocation on B-301 caused A2's own recommendation to reject B-301 specifically with `LAB_CONFLICT` (never a fabricated `DIVISION_CONFLICT`) while still recommending a genuinely free lab; and the `allocation` table's row count was confirmed identical before and after every `recommend(...)` call. All temporary mutations (inflated batch strength, the persisted A1 test allocation) were confirmed reverted via `psql`. Regression re-verified: all Phase 3-11 endpoints still `200`; `/api/allocations` still `404` both directions; Flyway still at schema version 10; dev-seeded lab count confirmed 15.
+
 ## Scoring Engine Tests — Implemented (Phase 11)
 
 | Test | Class | What it proves |

@@ -89,6 +89,10 @@ This was chosen over a simpler "ratio against the single most-loaded lab" formul
 
 No scorer bean exists for these three (see the Readiness Matrix above) - registering a fake scorer that always returns a constant, or fabricating a formula against data that doesn't exist, was explicitly prohibited (PART 45/16/26 of the Phase 11 brief). Their `ScoringFactorId` enum constants remain reserved for whichever future phase gives them real, non-fabricated data to read.
 
+## Consumed by `ExplainableAllocationService` (Phase 12), never recomputed
+
+`ScoredCandidate.contributions()` (the exact `List<ScoreContribution>` this document describes above) is read verbatim into `ExplainedValidCandidate.scoreContributions()` (`com.college.laballocation.scheduling.explanation`) - no formula on this page is re-executed, no utilization query re-run, no capacity ratio recalculated. The explanation layer adds exactly one thing on top: a short display label per `ScoringFactorId` (`ScoringFactorLabels`, e.g. `PREFERRED_LAB_TYPE` → "Preferred lab type") for presentation, while the raw enum and every numeric field are preserved unchanged. A pairwise `ScoreComparison.compare(a, b)` helper diffs two candidates' contributions factor-by-factor (structured, deterministic - never natural-language generation) to answer "why did the winner outrank the runner-up," using only these same already-computed numbers.
+
 ## Explainability Output — actual `ScoredCandidate` shape (Phase 11)
 
 Every scored candidate carries a structured breakdown, not just a number - this is `ScoredCandidate`/`ScoreContribution` as actually implemented, a real BDA scenario observed live in Docker (2026-08-23; Division A strength 68, Batch A1 strength 23, subject BDA prefers `DATA_ENGINEERING`):

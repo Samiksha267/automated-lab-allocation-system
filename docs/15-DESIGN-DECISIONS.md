@@ -725,3 +725,45 @@ ADR-style log of significant, hard-to-reverse decisions. Each entry: Context, De
 **Reasons:** Distinguishing "the seeder has a bug" from "stale local environment state" matters - fixing the wrong thing (e.g. adding defensive dedup logic to an already-idempotent seeder) would have been a wasted, misleading change. The real fix was data hygiene, not code.
 
 **Trade-offs:** None - this is a one-time cleanup of local development state, not a schema or application-code change. Documented here so a future phase encountering an unexpected lab count in a long-lived local Docker volume knows to check for stale manual-verification leftovers before assuming a seeder regression.
+
+---
+
+## ADR-053: `AllocationRecommendation`, Not `AllocationDecision`
+
+**Context:** Phase 8 deliberately deferred naming the "final outcome" type until scoring (Phase 11) and explanation (Phase 12) both existed to give it a real shape. Phase 12's brief explicitly required evaluating both names.
+
+**Decision:** `AllocationRecommendation`. No `AllocationDecision` type exists anywhere in the codebase.
+
+**Alternatives:** `AllocationDecision` (the name several earlier phase docs used as a placeholder) was rejected specifically because "decision" implies something was decided/committed - closer to the connotation of an approved, actionable outcome. Nothing here is committed: no `Allocation` row is created, no lab is reserved, and the result can be stale the instant the read transaction ends.
+
+**Reasons:** Precise terminology matters for a system whose entire premise is that a snapshot is not a booking (PART 2 of the Phase 12 brief). "Recommendation" accurately signals "advisory, could change" the way "decision" does not - a reader (or a future engineer building Phase 15/16 on top of this) should not have to read the implementation to learn that recommending a lab doesn't reserve it.
+
+**Trade-offs:** None significant - this is a one-time naming choice with no functional cost either way.
+
+---
+
+## ADR-054: Two Distinct Explanation Types (`ExplainedValidCandidate` / `RejectedCandidateExplanation`), Not One Type With Nullable Score Fields
+
+**Context:** PART 6's draft sketch proposed a single `ExplainedCandidate` type with nullable `rank`/`score`/`applicableMaxScore`/`normalizedScore` fields, used for both valid and invalid candidates. PART 28 separately required that an invalid candidate's explanation must never contain `score = 0`, since that would misleadingly suggest scoring was applied to a hard rejection.
+
+**Decision:** Two separate record types. `ExplainedValidCandidate` has no nullable score fields - every field is always populated, because only valid, scored candidates are ever wrapped in one. `RejectedCandidateExplanation` has no score field at all, not even a nullable one.
+
+**Alternatives:** A single type with nullable score fields (the brief's own PART 6 sketch) was considered and rejected - a nullable field is a runtime convention a caller must remember to check ("is this null because it's invalid, or because of a bug upstream?"); a type that structurally cannot hold a score removes that question entirely. This mirrors the same reasoning `ScoredCandidate` (Phase 11) already applied by rejecting invalid candidates in its own constructor rather than allowing a zero/null score to exist for one.
+
+**Reasons:** Type-level guarantees are stronger than documentation or nullable-field discipline - `RejectedCandidateExplanation.score` cannot exist to be forgotten. This also keeps each type's responsibility narrow: `ExplainedValidCandidate` is "this candidate, ranked and scored"; `RejectedCandidateExplanation` is "this candidate, and every reason it failed."
+
+**Trade-offs:** Two types instead of one means `AllocationRecommendation` needs two separate list fields (`rankedValidCandidates`, `rejectedCandidates`) rather than one polymorphic list with a `valid` flag - accepted, since a caller iterating "all candidates regardless of validity" was never a real requirement of this phase (Phase 10's `CandidateGenerationResult` already serves that role if ever needed).
+
+---
+
+## ADR-055: Display Labels Are Separate Static Lookup Classes, Not Embedded Fields on Domain Types
+
+**Context:** PART 35/36 required human-readable labels for machine identifiers (`HardConstraintId`, violation `errorCode`, `ScoringFactorId`) without losing the machine identifier itself, and without turning every domain result object into a UI string.
+
+**Decision:** Three small, stateless static-lookup classes - `HardConstraintLabels`, `ViolationErrorCodeLabels`, `ScoringFactorLabels` - each mapping one enum/string identifier to a short display string. Explanation records (`ConstraintCheckExplanation`, `ViolationExplanation`) call these once at construction and store the resulting label alongside the untouched machine identifier; the underlying Phase 9/11 domain types (`HardConstraintId`, `ConstraintViolation`, `ScoringFactorId`) themselves are completely unmodified.
+
+**Alternatives:** Adding a `displayLabel()` method directly to `HardConstraintId` (an enum) was considered and rejected - it would couple a Phase 9 domain enum to a Phase 12 presentation concern, and any future addition/renaming of a display label would then require touching Phase 9's tested code. A single giant label-lookup class covering all three identifier kinds was also considered and rejected in favor of three focused, single-responsibility classes matching the three kinds of code being labeled.
+
+**Reasons:** Keeps "what a candidate failed" (domain fact, Phase 9) fully separate from "what to show a human" (presentation concern, Phase 12) - exactly the "structured + display layers" boundary the brief required (PART 36). A future UI/API layer can add or restyle a label without touching validation logic at all.
+
+**Trade-offs:** Three small files instead of one - accepted; each is under 30 lines and trivially testable/extendable.

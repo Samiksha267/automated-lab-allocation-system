@@ -1,6 +1,6 @@
 # Scheduling Engine
 
-**Status (Phase 11):** Candidate Generation (Phase 10) and a real Scoring Engine now both exist as tested code. `CandidateGenerator` (`com.college.laballocation.scheduling.generation`) takes one `SchedulingRequest`, builds its `SchedulingContext` once, and produces an `EvaluatedCandidate` (candidate + `ConstraintEvaluation`) for every lab in the system via the unmodified Phase 9 `ConstraintEngine`. `ScoringEngine` (`com.college.laballocation.scheduling.scoring`, Phase 11) then ranks only the *valid* candidates from that result using three real, data-backed soft-scoring factors — Capacity Fit, Preferred Lab Type, and Balanced Utilization. **No alternative-time search or backtracking exists yet, and no candidate is ever automatically selected or persisted** — Phase 11 answers "among the valid candidates, which are preferable?"; a future orchestration layer (Phase 12+) decides what to do with the ranking. `AllocationDecision`, `AlternativeAllocation`, and `SchedulingMetrics` remain design-only, deliberately deferred to the phases that actually need them (Phase 12/13) rather than built now as empty scaffolding.
+**Status (Phase 12):** Candidate Generation (Phase 10), Scoring (Phase 11), and now Explainable Allocation (Phase 12) all exist as tested code. `CandidateGenerator` (`com.college.laballocation.scheduling.generation`) takes one `SchedulingRequest`, builds its `SchedulingContext` once, and produces an `EvaluatedCandidate` for every lab via the unmodified Phase 9 `ConstraintEngine`. `ScoringEngine` (`com.college.laballocation.scheduling.scoring`) ranks only the *valid* candidates using Capacity Fit, Preferred Lab Type, and Balanced Utilization. `ExplainableAllocationService` (`com.college.laballocation.scheduling.explanation`, Phase 12) is the first orchestration layer combining both: it calls `CandidateGenerator` then `ScoringEngine` and converts their already-computed results into one structured, human- and machine-readable `AllocationRecommendation` - which lab is currently best, why, and why every other candidate was rejected or ranked lower. **No candidate is ever automatically selected/persisted, no alternative-time search, no backtracking** — a recommendation is advisory only, describing a snapshot, never a booking. `AlternativeAllocation` and `SchedulingMetrics` remain design-only, deferred to the phases that actually need them (Phase 13/14/25).
 
 ## Candidate Generation (Phase 10)
 
@@ -76,6 +76,44 @@ ScoringResult{request, rankedCandidates, validCandidateCount, enabledFactors}
 
 **Read-only, stateless, no selection:** `ScoringEngine` runs inside `@Transactional(readOnly = true)`, never writes, never caches between calls, and never selects/persists a "winner" - `rankedCandidates()` is already ordered best-first, but nothing beyond that list exists yet. That decision layer is Phase 12 (Explainable Allocation).
 
+## Explainable Allocation (Phase 12)
+
+```
+SchedulingRequest
+        ↓
+CandidateGenerator.generate(request)               (Phase 10, unmodified)
+        ↓
+CandidateGenerationResult
+        ↓
+ScoringEngine.score(generationResult)               (Phase 11, unmodified)
+        ↓
+ScoringResult
+        ↓
+ExplainableAllocationService.recommend(request)     (Phase 12 - the only new orchestration)
+        ↓
+AllocationRecommendation{status, recommendedCandidate, rankedValidCandidates, rejectedCandidates, rejectionSummary, summary}
+```
+
+**The first orchestration layer, not a third validation/scoring path:** `ExplainableAllocationService` (`com.college.laballocation.scheduling.explanation`) calls `CandidateGenerator` then `ScoringEngine` exactly once each and transforms their already-produced results - it recomputes no constraint, no score formula, and issues no additional database query beyond what those two already ran. Every `ConstraintResult`/`ConstraintViolation`/`ScoreContribution` surfaced in an `AllocationRecommendation` is the literal Phase 9/11 object (or a thin, non-recomputing display wrapper around it), never a re-derived value.
+
+**Advisory, not a booking:** `AllocationRecommendation` describes "the best candidate according to this snapshot," never "successfully booked." No `Allocation` row is created, no lab is reserved, no schedule is published, no row is locked - `recommend(...)` runs read-only inside one `@Transactional(readOnly = true)` boundary joining the read-only transactions `CandidateGenerator`/`ScoringEngine` already open. The result can become stale the instant the transaction ends (another request could occupy the same lab before any future booking commits) - Phase 16 owns commit-time revalidation, not this phase. Verified live in Docker: the `allocation` table's row count is identical before and after calling `recommend(...)`.
+
+**Terminology - `AllocationRecommendation`, never `AllocationDecision`:** Phase 8 deliberately deferred naming this type until scoring and explanation both existed to give it a real shape. "Decision" was rejected specifically because it implies something was committed; nothing is. See ADR in docs/15-DESIGN-DECISIONS.md.
+
+**Two result shapes, never a shared nullable-score type:** a valid candidate becomes an `ExplainedValidCandidate` (rank, score, applicable max, normalized score, the exact Phase 11 `ScoreContribution` list, plus a display-labeled constraint-check summary) - an invalid candidate becomes a `RejectedCandidateExplanation` (every `ViolationExplanation` it failed, never collapsed to the first reason). `RejectedCandidateExplanation` has **no score field at all**, not even a nullable one - a type that cannot hold a score cannot accidentally display `score = 0` for a hard rejection, which would misleadingly suggest scoring happened.
+
+**PASS/FAIL/NOT_APPLICABLE preserved exactly:** `ConstraintCheckExplanation` wraps one already-computed `ConstraintResult` with a display label - `NOT_APPLICABLE` (HC-11 with no CR actor, or a Lab Assistant actor) is never rendered as "passed"; callers must branch on the real three-way outcome. Reading the request's already-known `actor` (already on `SchedulingRequest`, not re-derived) supplies an accurate, non-fabricated reason string for a `NOT_APPLICABLE` result without re-evaluating HC-11.
+
+**No fake deferred factors:** `AllocationRecommendation` never displays "Faculty Preference: 10/10" or similar - only the three factors actually backed by a registered `AllocationScorer` bean (Phase 11) ever appear in a `ScoreContribution` list, because that list is read verbatim from `ScoredCandidate`.
+
+**Pairwise comparison, not natural-language generation:** `ScoreComparison.compare(a, b)` diffs two `ExplainedValidCandidate`s' contributions factor-by-factor into `ContributionDifference`s - a small, deterministic, reusable helper (PART 17 of the Phase 12 brief), never an LLM/NLG call (PART 37: explainability must be deterministic and derived only from actual algorithm output).
+
+**Rejection aggregation semantics, documented precisely:** `RejectionSummary.countByErrorCode()` counts how many *rejected candidates* carried each error code at least once - one candidate failing both `CAPACITY_VIOLATION` and `SOFTWARE_MISMATCH` increments both counts, so `sum(countByErrorCode.values())` is generally **not** equal to `rejectedCount`. Documented explicitly on the type so a future UI never mistakenly sums per-reason counts and displays that as "labs rejected."
+
+**Zero-valid and single-valid are both normal results:** `status = NO_VALID_CANDIDATE` with `recommendedCandidate = null` when every candidate failed some hard constraint - never an exception, never a search for a different time (that remains Phase 13). A single valid candidate is recommended outright, with the summary noting "only one candidate satisfied all hard constraints" rather than implying a meaningful multi-way comparison occurred.
+
+**"Other valid candidates," never "alternatives":** `AllocationRecommendation.otherValidCandidates()` (a derived view over `rankedValidCandidates`, not a second stored list - same pattern as `CandidateGenerationResult.validCandidates()`) holds every ranked valid candidate below the recommended one, all using the *same requested date/time*. The term "alternative scheduling suggestions" is deliberately reserved for Phase 13, which will search other times and/or labs - a materially different capability this phase does not implement.
+
 ## The Constraint Engine (Phase 9)
 
 ```
@@ -148,8 +186,8 @@ This is a **Constraint Satisfaction Problem (CSP)** for single-session validatio
 | `ConstraintEngine` / `ConstraintEvaluation` / `SchedulingConstraint` | **Implemented (Phase 9)** | The engine itself, its aggregate result type, and the interface every HC-01..HC-12 class implements. See "The Constraint Engine" section above. |
 | `CandidateGenerator` / `EvaluatedCandidate` / `CandidateGenerationResult` | **Implemented (Phase 10)** | `CandidateGenerator.generate(request)` (a `@Service`, not a pure record - it orchestrates real repository/factory/engine calls) returns a `CandidateGenerationResult`, which holds every `EvaluatedCandidate{candidate, constraintEvaluation}` for the request, valid and invalid alike. See "Candidate Generation" section above. |
 | `ScoringEngine` / `AllocationScorer` / `ScoreContribution` / `ScoredCandidate` / `ScoringResult` | **Implemented (Phase 11)** | `ScoringEngine.score(generationResult)` (a `@Service`) ranks only the valid candidates using Spring-discovered `AllocationScorer` beans (`CapacityFitScorer`, `PreferredLabTypeScorer`, `BalancedUtilizationScorer`); each returns a `ScoreContribution` (points/max/explanation/details) per candidate, summed into a `ScoredCandidate`, ranked into a `ScoringResult`. See "Scoring Engine" section above. |
-| `AllocationDecision` | Not yet implemented, deliberately deferred | Final outcome: selected candidate + full explanation, or failure + alternatives. Its real shape depends on alternatives (Phase 13), which doesn't exist yet; building it now would be speculative scaffolding rather than a tested contract. Phase 12 (Explainable Allocation) is where it belongs. |
-| `AlternativeAllocation` | Not yet implemented | A ranked fallback suggestion when the originally requested slot fails — Phase 13. |
+| `ExplainableAllocationService` / `AllocationRecommendation` / `ExplainedValidCandidate` / `RejectedCandidateExplanation` / `RejectionSummary` | **Implemented (Phase 12)** | `ExplainableAllocationService.recommend(request)` (a `@Service`) orchestrates `CandidateGenerator` + `ScoringEngine`, then converts the results into one structured `AllocationRecommendation` — advisory only, named deliberately not `AllocationDecision`. See "Explainable Allocation" section above. |
+| `AlternativeAllocation` | Not yet implemented | A ranked fallback suggestion (different lab and/or different time) when the originally requested slot fails — Phase 13. Distinct from Phase 12's `otherValidCandidates()`, which uses only the same requested time. |
 | `SchedulingMetrics` | Not yet implemented | Counters: candidates evaluated, constraints checked, backtrack count, execution time — for [16-PERFORMANCE-BENCHMARKS.md](16-PERFORMANCE-BENCHMARKS.md), Phase 14/25. |
 
 `constraint`, `scoring`, `conflict`, and the core scheduler operate **only** on these objects — never on JPA entities or DTOs directly (verified: none of `SchedulingRequest`/`SchedulingContext`/`CandidateAllocation`/`ConstraintResult`/`ConstraintViolation`/`ConstraintEvaluation` carries a single JPA annotation). Application services in the `scheduling` package are the translation boundary (load entities → build `SchedulingContext` via `SchedulingContextFactory` → build `CandidateAllocation` via `CandidateAllocationFactory` → `ConstraintEngine` validates → Phase 15/19 will persist an `Allocation`).
@@ -173,7 +211,9 @@ Score Remaining (Valid) Candidates Only (07-ALLOCATION-SCORING.md)    [ScoringEn
       ↓
 Rank Candidates (normalized score descending, lab.code ascending tie-break)    [implemented, Phase 11]
       ↓
-Return AllocationDecision: ranked valid candidates + explained rejections    [Phase 12]
+Build AllocationRecommendation: recommended candidate + ranked valid alternatives + explained rejections    [ExplainableAllocationService - implemented, Phase 12]
+      ↓
+(advisory only - no persistence, no reservation; Phase 16 revalidates at commit time)
 ```
 
 **Correction to the original Phase 1 sketch:** the line above originally read "Generate Candidate Labs (active + capacity ≥ required + required software/equipment/type present)" - i.e. prefiltering by the same conditions the hard constraints check. Phase 10 deliberately did **not** implement it that way (PART 9/10/24 of the Phase 10 brief): prefiltering by capacity/software/type would duplicate HC-07/08/10's own logic in a second place, risking Phase 9 and Phase 10 silently disagreeing, and would make a rejected lab's reason unrecoverable (a prefiltered-out lab never becomes a candidate at all, so there is no `ConstraintViolation` to show a CR later explaining "why isn't C-304 in the list"). `CandidateGenerator` generates from every lab and lets the real `ConstraintEngine` be the sole source of truth for validity - see "Candidate Generation" above and ADR in docs/15-DESIGN-DECISIONS.md. "Remove Invalid Candidates" (the original sketch's next step) is also not a separate step in the real implementation - `CandidateGenerationResult` keeps both `validCandidates()` and `invalidCandidates()` as filtered views, never physically discarding the rejected ones, since Phase 12/13 need them.

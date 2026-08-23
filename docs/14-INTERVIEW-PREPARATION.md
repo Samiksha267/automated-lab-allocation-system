@@ -1,6 +1,6 @@
 # Interview Preparation
 
-**Status: mixed.** The Authentication & RBAC, Academic Domain, Laboratory Domain, Subject Requirements, Faculty Availability, Scheduling Domain/Allocation Persistence, Constraint Engine, Candidate Generation, and Scoring Engine sections are verified against real, working Phase 3-11 code. Everything about explainable allocation, alternatives, backtracking, and performance benchmarking remains Phase 1 design-level answers, explicitly marked `TO BE VERIFIED AFTER IMPLEMENTATION` — nothing below claims a benchmark, a passing test, or a working demo before those things exist.
+**Status: mixed.** The Authentication & RBAC, Academic Domain, Laboratory Domain, Subject Requirements, Faculty Availability, Scheduling Domain/Allocation Persistence, Constraint Engine, Candidate Generation, Scoring Engine, and Explainable Allocation sections are verified against real, working Phase 3-12 code. Everything about alternatives, backtracking, FCFS concurrency, and performance benchmarking remains Phase 1 design-level answers, explicitly marked `TO BE VERIFIED AFTER IMPLEMENTATION` — nothing below claims a benchmark, a passing test, or a working demo before those things exist.
 
 ## Elevator Pitch (30 seconds)
 
@@ -309,6 +309,32 @@
 **Why retain the score breakdown?** Because a bare number can't be explained or trusted - `ScoredCandidate.contributions()` keeps every factor's points/max/explanation/details, so Phase 12 can compose a full user-facing explanation later without re-running any scorer, and so this phase's own manual verification could show *why* C-202 outranked B-201 (preferred-type credit, not just a coincidental total) rather than asserting it opaquely.
 
 **Concise algorithm explanation:** *"Given a `CandidateGenerationResult`, I take only its valid candidates. I load each candidate lab's scheduled minutes once, in one query, then run every registered soft-scoring factor against each valid candidate - Capacity Fit, Preferred Lab Type, Balanced Utilization - summing each factor's points into a total and its max into an applicable maximum. I sort the results by normalized score descending, breaking ties by lab code. Nothing here can promote an invalid candidate, because invalid candidates never reach this stage at all."*
+
+## Explainable Allocation (Phase 12 — implemented, verified answers)
+
+**How does explainable allocation work?** `ExplainableAllocationService.recommend(request)` calls `CandidateGenerator` (Phase 10) then `ScoringEngine` (Phase 11), exactly once each, and converts their already-produced results into one structured `AllocationRecommendation` - the highest-ranked valid candidate becomes the recommendation, every other ranked valid candidate is preserved as an "other valid candidate," and every invalid candidate is preserved with its full rejection reasons. It performs zero additional constraint evaluation and zero additional score computation - it is purely a transformation of results that already exist.
+
+**How do you explain why one lab was chosen over another?** `ScoreComparison.compare(winner, runnerUp)` diffs the two candidates' already-computed `ScoreContribution` lists factor-by-factor, producing a `ContributionDifference` per factor. Verified live: comparing C-202 against B-201 showed `PREFERRED_LAB_TYPE` contributing +15 in C-202's favor while `CAPACITY_FIT` contributed about -4.2 in B-201's favor - a structured, factual answer to "why C-202?", not a vague "it scored higher."
+
+**How do you explain rejected labs?** Every invalid candidate becomes a `RejectedCandidateExplanation` carrying every `ConstraintViolation` it failed (converted to a `ViolationExplanation` with a display label, machine `errorCode` preserved unchanged) - a candidate failing both capacity and software retains both reasons, never collapsed into "not available."
+
+**Why do you preserve invalid candidates?** Because a CR asking "why isn't C-304 an option?" deserves a real, structured answer, not silence - Phase 10 already made this decision (never discarding invalid candidates); Phase 12 is the layer that actually surfaces those preserved reasons to a caller.
+
+**Why don't you just return the highest score?** Because a bare winner with no context is unauditable and untrustworthy - a CR (or an interviewer) needs to see the full ranking, the score breakdown behind it, and why the rejected labs were rejected, to trust that "C-202" wasn't an arbitrary pick. This is also why `otherValidCandidates()` and `rejectedCandidates` are both preserved in full, not discarded once a winner is found.
+
+**How do hard constraints differ from soft-score explanations?** A hard-constraint explanation (`ConstraintCheckExplanation`) reports PASS/FAIL/NOT_APPLICABLE - a binary-ish gate with no notion of degree. A soft-score explanation (`ScoreContribution`, unchanged from Phase 11) reports points awarded out of a maximum - a continuous measure of preference among already-valid options. `RejectedCandidateExplanation` structurally cannot hold a score at all, so this distinction can never be blurred by accident.
+
+**What happens if there is no valid lab?** `status = NO_VALID_CANDIDATE`, `recommendedCandidate = null`, and a factual summary ("N candidates evaluated, N rejected, most common reason: X") - never an exception, never a search for a different time. Verified live by temporarily inflating a batch's required strength so every lab failed capacity.
+
+**Does recommending a lab reserve it?** No. `recommend(...)` runs entirely inside a read-only transaction and creates no row, locks nothing, and reserves nothing. Verified live: the `allocation` table's row count was identical before and after calling `recommend(...)`, including across every scenario run in the same verification session.
+
+**Why is recommendation advisory?** Because a snapshot taken now can be stale the moment another request commits a real booking - concurrent-safe revalidation at commit time is explicitly Phase 16's job, not this one's. Calling the result a "recommendation" rather than a "decision" was a deliberate terminology choice for exactly this reason (see ADR-053).
+
+**How do you avoid recomputing constraints for explanation?** `ConstraintCheckExplanation.from(...)` reads the `ConstraintResult` list already attached to the `EvaluatedCandidate` from Phase 10's `CandidateGenerationResult` - `ConstraintEngine.evaluate(...)` is never called a second time. The one piece of *new* information used (a short reason string for `NOT_APPLICABLE`) is derived from the request's already-known `actor` field, not from re-running HC-11's logic.
+
+**Why is deterministic explainability better than using an LLM?** Because every explanation must be reproducible, auditable, and traceable back to an exact formula or rule - an LLM call would introduce non-determinism, latency, cost, and a layer that could hallucinate a reason unrelated to what the engine actually computed. Every number and reason in an `AllocationRecommendation` is directly attributable to a specific `ConstraintResult` or `ScoreContribution` that already existed before the explanation layer ran.
+
+**How will Phase 13 use rejection reasons?** `RejectedCandidateExplanation.violations()` already tells Phase 13 *why* the originally requested (lab, time) combination didn't work for a given candidate - e.g. "every lab failed `CAPACITY_VIOLATION`" versus "one lab failed only `LAB_UNAVAILABLE`" suggests very different alternative-search strategies. Phase 13 can read this without re-running generation.
 
 ## Real Engineering Problems Encountered
 

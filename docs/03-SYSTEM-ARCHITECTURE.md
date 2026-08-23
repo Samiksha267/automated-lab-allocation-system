@@ -721,3 +721,45 @@ No new migration - Phase 11 is entirely code against the existing Phase 8/9/10 s
 ### Verified end-to-end (Dockerized, 2026-08-23)
 
 A temporary `@Profile("dev")`-only `ApplicationRunner` (`DevScoringVerificationRunner`, deleted after use, same safe pattern as Phase 9/10's) exercised the real `ScoringEngine` against the real dev-seeded BDA/CNS demo data over live Docker/Postgres. All required scenarios matched: the BDA ranking scenario (batch A1, required capacity 23) produced C-202 (Data-Engineering-typed, Cloudera-capable) ranked first over B-201/B-301 (Computer-typed, also Cloudera-capable) - preferred-lab-type credit outweighing a looser capacity fit, a real soft-factor interaction, not hardcoded; C-304 (no Cloudera, but otherwise a strong soft-score candidate - Data-Engineering type, decent capacity) was confirmed invalid and never appeared in the ranking, proving hard constraints override soft scoring; temporarily inflating batch A1's strength drove every candidate invalid and produced an empty ranking with zero valid count, not an exception; the same request scored twice produced an identical ranking (determinism); CNS (a subject with zero preferences at all) against B-202/D-202 (identical capacity 60, identical Computer type) produced an exact score tie, broken deterministically by lab code ascending (B-202 before D-202); and temporarily loading D-202 with five extra sessions on other dates dropped its Balanced Utilization score below B-202's (idle), confirmed reverted afterward via `psql` (zero leftover allocations, batch A1 strength restored to 23). Regression re-verified: all Phase 3-10 endpoints still 200; `/api/allocations` still 404 both directions; Flyway still at schema version 10; dev-seeded lab count confirmed 15.
+
+## 20. Phase 12 — Explainable Allocation (implemented)
+
+### Pipeline
+
+```mermaid
+flowchart TD
+    Req[SchedulingRequest] --> CG[CandidateGenerator.generate - Phase 10, unmodified]
+    CG --> GR[CandidateGenerationResult]
+    GR --> SE[ScoringEngine.score - Phase 11, unmodified]
+    SE --> SR[ScoringResult]
+    SR --> EX[ExplainableAllocationService.recommend]
+    GR --> EX
+    EX --> Rec["AllocationRecommendation: status, recommendedCandidate, rankedValidCandidates, rejectedCandidates, rejectionSummary, summary"]
+```
+
+`ExplainableAllocationService` is the first orchestration layer combining Phase 10 and Phase 11 - it calls each exactly once and transforms their already-computed results, recomputing no constraint and no score formula. It is read-only (`@Transactional(readOnly = true)`) and advisory: nothing is persisted, reserved, or locked. See docs/05-SCHEDULING-ENGINE.md for the full architecture and docs/07-ALLOCATION-SCORING.md for how score contributions are surfaced without recomputation.
+
+### New backend additions (Phase 12)
+
+```
+com.college.laballocation.scheduling.explanation/   ExplainableAllocationService (@Service)
+                                                       AllocationRecommendation / RecommendationStatus
+                                                       ExplainedValidCandidate / RejectedCandidateExplanation
+                                                       ConstraintCheckExplanation / ViolationExplanation
+                                                       RejectionSummary / ContributionDifference / ScoreComparison
+                                                       HardConstraintLabels / ViolationErrorCodeLabels / ScoringFactorLabels (display-layer label lookups)
+```
+
+No changes to Phase 9/10/11 classes - `ConstraintEngine`, `CandidateGenerator`, and `ScoringEngine` are consumed exactly as they already existed.
+
+### Advisory boundary (PART 2 of the Phase 12 brief)
+
+"Recommended lab C-202" means *best candidate according to this snapshot*, never *successfully booked*. No `Allocation` row is created, no lab is reserved, no schedule version is published, no row is locked. Verified live in Docker: `allocation` row count identical before and after `recommend(...)`.
+
+### No production recommendation API (yet)
+
+`ExplainableAllocationService` remains internal, same as `CandidateGenerator`/`ScoringEngine` - no `POST /api/scheduling/recommend` or equivalent was added this phase (PART 44 of the brief: keep it internal unless an endpoint materially improves verification/demo - manual Docker verification via a temporary dev harness already did, without adding new production surface area). Phase 15 is still where a real CR-facing endpoint belongs.
+
+### Verified end-to-end (Dockerized, 2026-08-23)
+
+A temporary `@Profile("dev")`-only `ApplicationRunner` (`DevExplanationVerificationRunner`, deleted after use, same safe pattern as Phase 9/10/11's) exercised the real `ExplainableAllocationService` against the real dev-seeded BDA/CNS demo data over live Docker/Postgres. All required scenarios matched: the BDA recommendation selected C-202 (rank 1, `39.58/60.0`) with B-201 and B-301 preserved as ranked "other valid candidates," and C-304 correctly rejected with `SOFTWARE_MISMATCH` and absent from the ranking entirely (hard-vs-soft proof); a pairwise `ScoreComparison` between C-202 and B-201 correctly attributed the ranking difference to `PREFERRED_LAB_TYPE` (+15) outweighing a `CAPACITY_FIT` deficit (-4.22); temporarily inflating batch A1's strength produced `NO_VALID_CANDIDATE` with a null recommendation and a factual summary ("15 candidate(s) evaluated, 15 rejected, most common reason CAPACITY_VIOLATION"), never an exception; CNS (zero subject preferences) produced an exact tie between B-202 and D-202, both correctly reported at applicable-max `45.0` (not `60.0` - `PREFERRED_LAB_TYPE` correctly `NOT_APPLICABLE` and excluded from the denominator); and a real, persisted A1 allocation on B-301 caused A2's own recommendation to correctly reject B-301 with `LAB_CONFLICT` specifically (never a fabricated `DIVISION_CONFLICT`), while still recommending a different, genuinely free lab. Confirmed via `psql` afterward that every temporary mutation (the inflated batch strength, the persisted A1 test allocation) was fully reverted. Regression re-verified: all Phase 3-11 endpoints still 200; `/api/allocations` still 404 both directions; Flyway still at schema version 10; dev-seeded lab count confirmed 15.

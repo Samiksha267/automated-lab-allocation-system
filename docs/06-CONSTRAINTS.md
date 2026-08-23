@@ -173,6 +173,8 @@ valid(s, ℓ)  iff  s.requiredLabType == null  OR  ℓ.labType == s.requiredLabT
 
 **Consumed by `CandidateGenerator` (Phase 10):** `ConstraintEngine.evaluate(...)` is called once per candidate lab, for every lab in the system, by the new `CandidateGenerator` (`com.college.laballocation.scheduling.generation`) — one `ConstraintEvaluation` per lab, none skipped, none prefiltered by a duplicate check. `CandidateGenerator` contains no constraint logic of its own; this file's rules remain the single source of truth for validity. See docs/05-SCHEDULING-ENGINE.md "Candidate Generation."
 
+**Consumed by `ExplainableAllocationService` (Phase 12), never re-evaluated:** each `ConstraintResult` already produced above (PASS/FAIL/NOT_APPLICABLE, plus a FAIL's `ConstraintViolation`) is read directly from the already-computed `CandidateGenerationResult` and wrapped in a `ConstraintCheckExplanation`/`ViolationExplanation` (`com.college.laballocation.scheduling.explanation`) that adds only a display label — the machine `HardConstraintId`/`errorCode` is preserved unchanged alongside it. `ConstraintEngine.evaluate(...)` is never called a second time to produce an explanation. `ConstraintOutcome.NOT_APPLICABLE` (HC-11) is represented as such explicitly, never rendered as if it were `PASS` — see docs/05-SCHEDULING-ENGINE.md "Explainable Allocation."
+
 ---
 
 ## Conflict Interaction Matrix (HC-04 / HC-05 combined view)
