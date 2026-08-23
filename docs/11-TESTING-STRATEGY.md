@@ -51,6 +51,44 @@ No test result is ever claimed without actually running the suite (project worki
 
 **Manually verified against the Dockerized stack (2026-08-22):** all 8 of the phase brief's required scenarios (A–H — lab creation, unauthorized mutation, invalid capacity, duplicate code, Cloudera filter, capacity filter, combined filter, invalid unavailability interval) executed with real `curl` requests against the running containers, plus a restart-and-recount idempotency check on the dev seed data (15 labs → 16 after one test-created lab, software/lab_software/lab_equipment row counts unchanged across the restart).
 
+## Conflict Analysis + Alternative Suggestion Tests — Implemented (Phase 13)
+
+| Test | Class | What it proves |
+|---|---|---|
+| Temporal-only codes classified as TEMPORAL; structural codes classified as STRUCTURAL; unrecognized code defaults to STRUCTURAL | `ConflictClassificationTest` | The classification table matches docs/06-CONSTRAINTS.md exactly, and an unknown code fails safe (never assumed time-solvable) |
+| Candidate failing only a temporal constraint is structurally viable | `ConflictAnalyzerTest` | Structural viability = "zero structural failures," proven directly |
+| Candidate failing structural + temporal is NOT structurally viable | `ConflictAnalyzerTest` | One structural failure disqualifies a candidate from viability regardless of other failures |
+| All candidates failing capacity → zero structurally viable labs | `ConflictAnalyzerTest` | The structural-impossibility detection itself |
+| Mixed structural/temporal candidates still yield viable labs | `ConflictAnalyzerTest` | The required mixed case (12 software failures + 3 temporal-only) correctly finds the 3 |
+| Multiple temporal failures on one candidate are both retained | `ConflictAnalyzerTest` | No collapsing to a single reason |
+| Conflict details carry correct category and non-additive occurrence count | `ConflictAnalyzerTest` | `ConflictDetail` correctly wraps the reused Phase 12 `RejectionSummary` |
+| Policy parses configured values; rejects day-start≥day-end, non-positive step/bound | `SchedulingSlotPolicyTest` | Configuration validation actually enforces the documented invariants |
+| Every generated slot preserves the requested duration | `SchedulingSlotProviderTest` | PART 10 - duration is never silently changed |
+| The exact originally-requested slot is never repeated | `SchedulingSlotProviderTest` | No wasted re-evaluation of an already-known-invalid time |
+| Same-day slots ordered by proximity to the requested start | `SchedulingSlotProviderTest` | PART 12 - time-proximity ranking |
+| Same-day slots always precede later-day slots | `SchedulingSlotProviderTest` | PART 13 Priority 2 (day displacement) dominates |
+| Result bounded by the configured max-slots-searched | `SchedulingSlotProviderTest` | PART 28 - the search bound is real, not aspirational |
+| A non-working day is skipped entirely during lookahead | `SchedulingSlotProviderTest` | Sunday never consumes search budget or appears in results |
+| Deterministic across repeated calls with identical input | `SchedulingSlotProviderTest` | PART 29 - no hidden randomness or hash-order dependency |
+| Already-recommended request needs no alternative search | `AlternativeSuggestionServiceTest` | `ALTERNATIVES_NOT_NEEDED`, zero slots searched |
+| Structurally impossible request never triggers time search | `AlternativeSuggestionServiceTest` | `recommend(...)` is called exactly once (only for the original request) |
+| Temporal-only failure triggers alternative-time search | `AlternativeSuggestionServiceTest` | The core search-decision boolean, exercised end-to-end |
+| Mixed structural/temporal candidates still search | `AlternativeSuggestionServiceTest` | Service-level equivalent of the analyzer-level mixed-case test |
+| Actor is preserved in every generated alternative request | `AlternativeSuggestionServiceTest` | HC-11 continues to apply unchanged; no bypass to an internal/Lab-Assistant context |
+| Duration is preserved in every generated alternative request | `AlternativeSuggestionServiceTest` | PART 10, verified at the service boundary |
+| No valid alternative across all searched slots → `NO_ALTERNATIVE_FOUND` | `AlternativeSuggestionServiceTest` | Normal, non-exceptional exhaustion of the search bound |
+| Result bounded by the configured max-suggestions | `AlternativeSuggestionServiceTest` | PART 46 |
+| Closer time displacement ranks above a higher score farther away | `AlternativeSuggestionServiceTest` | PART 13 Priority 2 outranks Priority 3, proven with an adversarial fixture |
+| Tied time displacement and score break by lab code | `AlternativeSuggestionServiceTest` | PART 13 Priority 4, using a genuinely equidistant (before/after) pair |
+| Lab conflict resolved by same-time-different-lab, no alternative search needed | `AlternativeSuggestionIT` (Testcontainers, environment-blocked here) | Real persisted occupancy against real data |
+| Batch conflict across every lab triggers alternative-time search | `AlternativeSuggestionIT` | Real persisted batch double-booking |
+| Faculty unavailable at requested time but available later yields a real alternative | `AlternativeSuggestionIT` | Real `FacultyAvailability` gap against real data |
+| Structural impossibility skips alternative-time search entirely | `AlternativeSuggestionIT` | Real inflated-capacity scenario |
+| A1/A2 simultaneous sessions both receive independent recommendations | `AlternativeSuggestionIT` | The project's signature scenario, proven at the alternative-search layer |
+| Alternative search never changes the allocation row count | `AlternativeSuggestionIT` | Persistence-safety proof against real Postgres |
+
+**Manually verified against the Dockerized stack (2026-08-23), via a temporary `@Profile("dev")`-only `ApplicationRunner` (`DevAlternativeVerificationRunner`) deleted after use (no production alternative-search API was added just to test this):** occupying B-301 with a different batch/faculty (CNS/A2) at the BDA/A1 requested time resolved via same-time-different-lab (`C-202` recommended, zero slots searched); requesting BDA/A1 during Faculty BDA's real seeded Monday 12:00-14:00 unavailability gap found 3 structurally-viable Cloudera labs and a real alternative (`10:00-12:00 C-202`, closest valid time) - simultaneously the required mixed-case proof; persisting a genuine batch-A1 session forced uniform `BATCH_CONFLICT` and still found a valid later time; temporarily inflating batch A1's strength confirmed `slotsSearched=0` (search never entered); and a real, persisted A1 session did not prevent A2 from receiving its own valid same-time recommendation on a different lab, with no false `DIVISION_CONFLICT`. All scenarios matched (`allScenariosMatch=true`) after fixing a scenario-design bug in the harness itself (see docs/15-DESIGN-DECISIONS.md / completion report's Real Bugs Found). Regression re-verified: all Phase 3-12 endpoints still `200`; `/api/allocations` still `404` both directions; Flyway still at schema version 10; dev-seeded lab count confirmed 15.
+
 ## Explainable Allocation Tests — Implemented (Phase 12)
 
 | Test | Class | What it proves |

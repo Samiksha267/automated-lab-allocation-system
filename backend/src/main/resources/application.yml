@@ -56,6 +56,21 @@ app:
     capacity-fit-weight: ${SCORING_CAPACITY_FIT_WEIGHT:30}
     preferred-lab-type-weight: ${SCORING_PREFERRED_LAB_TYPE_WEIGHT:15}
     balanced-utilization-weight: ${SCORING_BALANCED_UTILIZATION_WEIGHT:15}
+  scheduling:
+    # Authoritative college scheduling-slot rules for Phase 13 alternative-time
+    # search - collected directly from the user (docs/ASSUMPTIONS.md A-35),
+    # never assumed. Sessions run in fixed 2-hour blocks starting on the hour;
+    # day-start/day-end bound the latest possible start hour (17:00, since
+    # 17:00+2h=19:00). Working days Monday-Saturday. max-lookahead-days was not
+    # given an exact number ("up to N, a small number like 2-3") - defaults to
+    # 3, this project's own documented choice within the user's stated bound.
+    day-start-time: "${SCHEDULING_DAY_START_TIME:09:00}"
+    day-end-time: "${SCHEDULING_DAY_END_TIME:19:00}"
+    slot-step-minutes: ${SCHEDULING_SLOT_STEP_MINUTES:60}
+    working-days: ${SCHEDULING_WORKING_DAYS:MONDAY,TUESDAY,WEDNESDAY,THURSDAY,FRIDAY,SATURDAY}
+    max-lookahead-days: ${SCHEDULING_MAX_LOOKAHEAD_DAYS:3}
+    max-alternative-time-slots-searched: ${SCHEDULING_MAX_ALTERNATIVE_TIME_SLOTS_SEARCHED:6}
+    max-alternative-suggestions: ${SCHEDULING_MAX_ALTERNATIVE_SUGGESTIONS:3}
   jwt:
     # JWT_SECRET must be overridden with a real, randomly-generated secret
     # (see docs/12-DEPLOYMENT-GUIDE.md) outside of local/dev use - the fallback

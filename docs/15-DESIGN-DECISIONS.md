@@ -767,3 +767,57 @@ ADR-style log of significant, hard-to-reverse decisions. Each entry: Context, De
 **Reasons:** Keeps "what a candidate failed" (domain fact, Phase 9) fully separate from "what to show a human" (presentation concern, Phase 12) - exactly the "structured + display layers" boundary the brief required (PART 36). A future UI/API layer can add or restyle a label without touching validation logic at all.
 
 **Trade-offs:** Three small files instead of one - accepted; each is under 30 lines and trivially testable/extendable.
+
+---
+
+## ADR-056: Structural vs. Temporal Conflict Classification Drives the Entire Alternative-Search Decision
+
+**Context:** Phase 13 needed a principled way to decide, for a request with zero valid candidates, whether searching alternative times could plausibly help - without duplicating any Phase 9 constraint logic to answer that question.
+
+**Decision:** Every existing `ConstraintViolation.errorCode()` is classified once, statically, as `STRUCTURAL` (true regardless of time of day: capacity, software, equipment, lab type, academic relationship, authorization) or `TEMPORAL` (could change if the time changes: lab/faculty/batch/division conflict, faculty availability, lab unavailability). A candidate is "structurally viable" iff none of its violations are `STRUCTURAL`. Alternative-time search is attempted iff at least one candidate is structurally viable.
+
+**Alternatives:** Re-running a cheaper/partial constraint check specifically to answer "would this candidate become valid at a different time" was considered and rejected - it would be a second, parallel validity concept alongside the real `ConstraintEngine`, at real risk of drifting out of sync with HC-01..HC-12 as they evolve. Classifying the *already-produced* violation codes instead requires no new validity logic at all - just a lookup table over data Phase 9 already emits.
+
+**Reasons:** This correctly handles the brief's mandatory mixed case (12 labs fail software, 3 Cloudera-capable labs fail only a temporal constraint - search must still proceed for those 3) with a single boolean check, no special-casing. It also naturally prevents pointless search: if every candidate has at least one structural failure, no amount of time search can ever help, and none is attempted (verified live: `slotsSearched=0` for a structurally-impossible request).
+
+**Trade-offs:** An unrecognized future error code defaults to `STRUCTURAL` (the conservative choice) - a genuinely time-solvable new constraint would need its code added to the temporal set explicitly, or it will simply never trigger a search for it. Accepted: failing to search in an ambiguous case is far safer than searching pointlessly or, worse, claiming a time change could fix something it cannot.
+
+---
+
+## ADR-057: Alternative Ranking Is Lexicographic (Day, Then Time, Then Score, Then Lab Code) — Never One Merged Number
+
+**Context:** An alternative suggestion has at least three things that could matter for ranking: how far away in time it is, how good the lab is (Phase 11's score), and a need for a deterministic tie-break. The brief's own example (a same-time 60%-score alternative should be preferred over a two-hours-later 90%-score one) rules out "just sort by score."
+
+**Decision:** A four-key lexicographic `Comparator` chain: day displacement ascending, then time-of-day displacement ascending, then Phase 11's normalized score descending, then lab code ascending. No step combines two of these into one derived number.
+
+**Alternatives:** A single weighted composite score (e.g. `score - k * displacementMinutes`) was considered and rejected - any weight `k` is an arbitrary, undocumented judgment call about how much disruption is "worth" how many score points, and the brief explicitly warns against exactly this ("do not silently combine everything into one unexplained magic score," PART 13).
+
+**Reasons:** Lexicographic ranking is fully explainable in one sentence per level, requires no tuning, and matches the intuitive priority the brief itself describes: minimizing disruption (day, then time) matters more than optimizing lab quality once a candidate is already valid. Verified directly with an adversarial fixture (low score close in time beats high score far away).
+
+**Trade-offs:** A suggestion that is only slightly closer in time but meaningfully worse in score will still outrank a much-better-scored, slightly-farther one - accepted as the correct behavior per the brief's own stated preference for minimizing disruption, not a defect.
+
+---
+
+## ADR-058: No `SAME_TIME_DIFFERENT_LAB` `AlternativeType` — It Is Structurally Unreachable
+
+**Context:** The brief's own draft sketch (PART 14) listed `SAME_TIME_DIFFERENT_LAB` as a plausible `AlternativeType` value alongside `SAME_DAY_DIFFERENT_TIME` and `DIFFERENT_DAY`.
+
+**Decision:** `AlternativeType` has exactly two values: `SAME_DAY_DIFFERENT_TIME` and `DIFFERENT_DAY`. No same-time-different-lab value exists.
+
+**Reasons:** Phase 10's `CandidateGenerator` already evaluates every lab at the exact requested time as part of building the original `AllocationRecommendation`. If any lab were valid then, `ExplainableAllocationService.recommend(...)` would already return `RECOMMENDED`, and `AlternativeSuggestionService.findAlternatives(...)` returns `ALTERNATIVES_NOT_NEEDED` immediately, before `SchedulingSlotProvider` is ever invoked - the code path that would produce a `SAME_TIME_DIFFERENT_LAB` suggestion is provably unreachable given how candidate generation already works. Creating the enum value anyway would violate the brief's own explicit rule (PART 14): "do not create enum values for unsupported behavior."
+
+**Trade-offs:** None - a caller wanting "is there a same-time solution" already has the answer from `AllocationRecommendation.status()`/`recommendedCandidate()`/`otherValidCandidates()` (Phase 12) without needing a Phase 13 type for it.
+
+---
+
+## ADR-059: `SchedulingSlotPolicy` Is a Single, Centralized, User-Sourced Configuration — Never Guessed College Hours
+
+**Context:** Phase 13's alternative-time search fundamentally needs to know what times are worth trying - working days, daily hours, session duration, how far ahead to look. No such rule existed anywhere in this repository before this phase (docs/ASSUMPTIONS.md A-35), and the brief explicitly forbade inventing one.
+
+**Decision:** The missing rules were requested directly from the user rather than assumed. The answer (fixed 2-hour sessions on the hour, 09:00-19:00, Monday-Saturday, small look-ahead) is centralized in exactly one component, `SchedulingSlotPolicy`, backed by `app.scheduling.*` configuration - following this project's existing constructor-`@Value` convention.
+
+**Alternatives:** Silently defaulting to a "reasonable-sounding" college schedule (e.g. 09:00-17:00, weekdays only, hourly lunch break) was considered and rejected outright - it would have been exactly the fabrication the brief's PART 75 explicitly prohibited, and a wrong assumption baked into scheduling logic is far more costly to discover later than a clarifying question asked once, up front.
+
+**Reasons:** Keeping the policy in one component (rather than scattering magic time/day literals across `SchedulingSlotProvider`) means a future correction to real college policy - if these values ever prove wrong - requires changing configuration in exactly one place, with zero code changes to conflict analysis, scoring, or generation.
+
+**Trade-offs:** `max-lookahead-days` was not given an exact number by the user ("up to N, a small number like 2-3") - this project chose 3 as its own documented default within that stated bound, explicitly flagged as a project decision rather than a college policy fact (docs/ASSUMPTIONS.md A-35).

@@ -1,6 +1,6 @@
 # Scheduling Engine
 
-**Status (Phase 12):** Candidate Generation (Phase 10), Scoring (Phase 11), and now Explainable Allocation (Phase 12) all exist as tested code. `CandidateGenerator` (`com.college.laballocation.scheduling.generation`) takes one `SchedulingRequest`, builds its `SchedulingContext` once, and produces an `EvaluatedCandidate` for every lab via the unmodified Phase 9 `ConstraintEngine`. `ScoringEngine` (`com.college.laballocation.scheduling.scoring`) ranks only the *valid* candidates using Capacity Fit, Preferred Lab Type, and Balanced Utilization. `ExplainableAllocationService` (`com.college.laballocation.scheduling.explanation`, Phase 12) is the first orchestration layer combining both: it calls `CandidateGenerator` then `ScoringEngine` and converts their already-computed results into one structured, human- and machine-readable `AllocationRecommendation` - which lab is currently best, why, and why every other candidate was rejected or ranked lower. **No candidate is ever automatically selected/persisted, no alternative-time search, no backtracking** — a recommendation is advisory only, describing a snapshot, never a booking. `AlternativeAllocation` and `SchedulingMetrics` remain design-only, deferred to the phases that actually need them (Phase 13/14/25).
+**Status (Phase 13):** Candidate Generation (Phase 10), Scoring (Phase 11), Explainable Allocation (Phase 12), and now Conflict Analysis + Alternative Suggestions (Phase 13) all exist as tested code. `CandidateGenerator` (`com.college.laballocation.scheduling.generation`) takes one `SchedulingRequest`, builds its `SchedulingContext` once, and produces an `EvaluatedCandidate` for every lab via the unmodified Phase 9 `ConstraintEngine`. `ScoringEngine` (`com.college.laballocation.scheduling.scoring`) ranks only the *valid* candidates using Capacity Fit, Preferred Lab Type, and Balanced Utilization. `ExplainableAllocationService` (`com.college.laballocation.scheduling.explanation`, Phase 12) combines both into one structured `AllocationRecommendation`. `ConflictAnalyzer` (`com.college.laballocation.scheduling.conflict`) and `AlternativeSuggestionService` (`com.college.laballocation.scheduling.alternative`, Phase 13) sit one layer above: when the requested time has no valid candidate, they classify why (structural vs. temporal) and, only when genuinely worthwhile, search a small, bounded set of alternative times using the exact same generate→score→explain pipeline. **No candidate is ever automatically selected/persisted, no backtracking, no moving of existing sessions, no FCFS/CR-booking** — every result remains advisory, describing a snapshot, never a booking. `SchedulingMetrics` remains design-only, deferred to Phase 25.
 
 ## Candidate Generation (Phase 10)
 
@@ -114,6 +114,56 @@ AllocationRecommendation{status, recommendedCandidate, rankedValidCandidates, re
 
 **"Other valid candidates," never "alternatives":** `AllocationRecommendation.otherValidCandidates()` (a derived view over `rankedValidCandidates`, not a second stored list - same pattern as `CandidateGenerationResult.validCandidates()`) holds every ranked valid candidate below the recommended one, all using the *same requested date/time*. The term "alternative scheduling suggestions" is deliberately reserved for Phase 13, which will search other times and/or labs - a materially different capability this phase does not implement.
 
+## Conflict Analysis + Alternative Suggestions (Phase 13)
+
+```
+SchedulingRequest
+        ↓
+ExplainableAllocationService.recommend(request)          (Phase 12, unmodified)
+        ↓
+AllocationRecommendation
+        ↓
+ConflictAnalyzer.analyze(recommendation)                 (pure transformation - no DB, no re-evaluation)
+        ↓
+ConflictAnalysis{structurallyViableLabIds, temporalFailuresByLabId, conflicts, rejectionSummary}
+        ↓
+alternativeTimeSearchWorthwhile()?  ── false ──▶ NO_ALTERNATIVE_FOUND (search never attempted)
+        │ true
+        ↓
+SchedulingSlotProvider.generateCandidateSlots(request)    (bounded, deterministic, ordered)
+        ↓
+for each candidate slot (up to the search bound):
+    build a new SchedulingRequest (same subject/faculty/division/batch/actor/term/duration, new date/time)
+        ↓
+    ExplainableAllocationService.recommend(alternativeRequest)   (the exact same Phase 12 pipeline, no shortcuts)
+        ↓
+    RECOMMENDED? → keep its top-ranked ExplainedValidCandidate as one AlternativeSuggestion
+        ↓
+rank collected suggestions, cap to the suggestion bound
+        ↓
+AlternativeSearchResult{originalRecommendation, conflictAnalysis, suggestions, status, slotsSearched}
+```
+
+**No duplicate validation logic, ever** (PART 2 of the Phase 13 brief): `ConflictAnalyzer` reads only `AllocationRecommendation.rejectedCandidates()`/`rejectionSummary()` - both already-computed Phase 12 objects - and never queries a repository or calls `ConstraintEngine` a second time. Every alternative slot's validity is decided by one more real call to `ExplainableAllocationService.recommend(...)`, which itself calls the unmodified Phase 10/11 pipeline - `AlternativeSuggestionService` never itself contains an `if (labOccupied)`-style check. There remains exactly one source of truth for validity across all thirteen phases.
+
+**Acyclic dependency, not recursion** (PART 31/32): `AlternativeSuggestionService` depends on `ExplainableAllocationService`; the reverse is never true - `ExplainableAllocationService` has no knowledge `AlternativeSuggestionService` exists. No refactor of Phase 12 was needed to achieve this; the dependency graph was already a clean layered stack.
+
+**Structural vs. temporal conflict classification** (PART 4/5): every existing `ConstraintViolation.errorCode()` (Phase 9, unchanged) is classified by `ConflictClassification.categoryOf(...)` - `TEMPORAL` (`LAB_CONFLICT`, `FACULTY_CONFLICT`, `FACULTY_UNAVAILABLE`, `BATCH_CONFLICT`, `DIVISION_CONFLICT`, `LAB_UNAVAILABLE`) can plausibly be solved by changing the time; `STRUCTURAL` (`CAPACITY_VIOLATION`, `SOFTWARE_MISMATCH`, `EQUIPMENT_MISMATCH`, `LAB_TYPE_MISMATCH`, `INVALID_ACADEMIC_RELATIONSHIP`, `FORBIDDEN_DIVISION_ACCESS`, `CR_ASSIGNMENT_NOT_FOUND`) is true at every time of day, so changing the time can never fix it. No new error codes were introduced - this is purely a categorization of Phase 9's existing thirteen.
+
+**Structural viability - the whole search decision in one boolean** (PART 35/36): a rejected candidate is "structurally viable" iff *none* of its violations are `STRUCTURAL` - even if it fails one or more `TEMPORAL` constraints. `ConflictAnalysis.alternativeTimeSearchWorthwhile()` is simply "at least one candidate is structurally viable." This correctly handles the brief's required mixed case: if 12 labs fail `SOFTWARE_MISMATCH` and 3 Cloudera-capable labs fail only `FACULTY_UNAVAILABLE`, those 3 are structurally viable, so search proceeds - verified live (see docs/11-TESTING-STRATEGY.md).
+
+**Same-time-different-lab needs no new search logic at all** (PART 7/8/38): Phase 10's `CandidateGenerator` already evaluates *every* lab at the exact requested time. If any lab were valid there, `ExplainableAllocationService.recommend(...)` would already return `RECOMMENDED`, and `AlternativeSuggestionService` returns `ALTERNATIVES_NOT_NEEDED` immediately without ever calling `SchedulingSlotProvider` - "same time, different lab" is not a separate capability Phase 13 had to build; it already existed by construction. This is also why `AlternativeType` has no `SAME_TIME_DIFFERENT_LAB` constant - it can never actually be produced by this architecture, and PART 14 explicitly prohibits enum values for unreachable behavior.
+
+**Slot policy - collected from the user, not invented** (PART 75/76): no authoritative college scheduling-slot rules (working days, daily hours, session duration, break windows) existed anywhere in this repository before this phase. Rather than guess, the missing rules were requested directly and are now centralized in `SchedulingSlotPolicy` (`app.scheduling.*`): fixed 2-hour sessions starting on the hour, 09:00-19:00 (valid start hours 09-17), Monday-Saturday, up to 3 lookahead days, 6 slots searched, 3 suggestions returned. See docs/ASSUMPTIONS.md A-35 and ADR-056.
+
+**Ordering - lexicographic, never one merged score** (PART 13/29): `AlternativeSuggestionService`'s ranking comparator is, in order: (1) day displacement ascending, (2) time-of-day displacement from the original request ascending, (3) the exact Phase 11 normalized score descending, (4) lab code ascending as the final deterministic tie-break. A closer time with a lower score can and does outrank a farther time with a higher score - verified live and by a dedicated unit test.
+
+**Search bounds - exact, configured, reported** (PART 28/30): at most 6 (day, time) slot combinations are ever run through the full generate→score→explain pipeline per search (`SchedulingSlotProvider` truncates deterministically, closest-first); at most 3 suggestions are ever returned. `AlternativeSearchResult.slotsSearched()` reports the real number actually attempted, for transparency. Complexity: `O(min(H*D, maxSlotsSearched) * labsPerRequest)` full pipeline runs, where `H` (9) is valid start hours/day and `D` (4) is candidate days - a small, bounded multiple of Phase 10/11's own already-documented per-request cost, never a combinatorial search.
+
+**Determinism** (PART 29): `SchedulingSlotProvider` produces a plain, explicitly-sorted `List`, never iterates a `HashSet`/`HashMap` or relies on incidental database row order - identical input and database state always produce an identical alternative ordering.
+
+**Advisory, never a reservation** (PART 79): exactly like Phase 12's `AllocationRecommendation`, an `AlternativeSuggestion` describes a snapshot - no `Allocation` row is created, nothing is locked, and nothing is guaranteed to remain available. Verified live: the `allocation` table's row count is identical before and after every `findAlternatives(...)` call. Phase 16 owns commit-time revalidation.
+
 ## The Constraint Engine (Phase 9)
 
 ```
@@ -187,7 +237,8 @@ This is a **Constraint Satisfaction Problem (CSP)** for single-session validatio
 | `CandidateGenerator` / `EvaluatedCandidate` / `CandidateGenerationResult` | **Implemented (Phase 10)** | `CandidateGenerator.generate(request)` (a `@Service`, not a pure record - it orchestrates real repository/factory/engine calls) returns a `CandidateGenerationResult`, which holds every `EvaluatedCandidate{candidate, constraintEvaluation}` for the request, valid and invalid alike. See "Candidate Generation" section above. |
 | `ScoringEngine` / `AllocationScorer` / `ScoreContribution` / `ScoredCandidate` / `ScoringResult` | **Implemented (Phase 11)** | `ScoringEngine.score(generationResult)` (a `@Service`) ranks only the valid candidates using Spring-discovered `AllocationScorer` beans (`CapacityFitScorer`, `PreferredLabTypeScorer`, `BalancedUtilizationScorer`); each returns a `ScoreContribution` (points/max/explanation/details) per candidate, summed into a `ScoredCandidate`, ranked into a `ScoringResult`. See "Scoring Engine" section above. |
 | `ExplainableAllocationService` / `AllocationRecommendation` / `ExplainedValidCandidate` / `RejectedCandidateExplanation` / `RejectionSummary` | **Implemented (Phase 12)** | `ExplainableAllocationService.recommend(request)` (a `@Service`) orchestrates `CandidateGenerator` + `ScoringEngine`, then converts the results into one structured `AllocationRecommendation` — advisory only, named deliberately not `AllocationDecision`. See "Explainable Allocation" section above. |
-| `AlternativeAllocation` | Not yet implemented | A ranked fallback suggestion (different lab and/or different time) when the originally requested slot fails — Phase 13. Distinct from Phase 12's `otherValidCandidates()`, which uses only the same requested time. |
+| `ConflictAnalyzer` / `ConflictAnalysis` / `ConflictDetail` | **Implemented (Phase 13)** | Pure transformation of an already-computed `AllocationRecommendation` into structural-vs-temporal classified conflict data - never queries a repository or re-evaluates a constraint. See "Conflict Analysis + Alternative Suggestions" section above. |
+| `AlternativeSuggestionService` / `AlternativeSuggestion` / `AlternativeSearchResult` / `SchedulingSlotProvider` / `SchedulingSlotPolicy` | **Implemented (Phase 13)** | The Phase 13 fallback-suggestion layer - a ranked fallback suggestion (different lab and/or different time) when the originally requested slot fails. Distinct from Phase 12's `otherValidCandidates()`, which uses only the same requested time. |
 | `SchedulingMetrics` | Not yet implemented | Counters: candidates evaluated, constraints checked, backtrack count, execution time — for [16-PERFORMANCE-BENCHMARKS.md](16-PERFORMANCE-BENCHMARKS.md), Phase 14/25. |
 
 `constraint`, `scoring`, `conflict`, and the core scheduler operate **only** on these objects — never on JPA entities or DTOs directly (verified: none of `SchedulingRequest`/`SchedulingContext`/`CandidateAllocation`/`ConstraintResult`/`ConstraintViolation`/`ConstraintEvaluation` carries a single JPA annotation). Application services in the `scheduling` package are the translation boundary (load entities → build `SchedulingContext` via `SchedulingContextFactory` → build `CandidateAllocation` via `CandidateAllocationFactory` → `ConstraintEngine` validates → Phase 15/19 will persist an `Allocation`).

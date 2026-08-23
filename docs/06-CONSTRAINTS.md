@@ -175,6 +175,25 @@ valid(s, ℓ)  iff  s.requiredLabType == null  OR  ℓ.labType == s.requiredLabT
 
 **Consumed by `ExplainableAllocationService` (Phase 12), never re-evaluated:** each `ConstraintResult` already produced above (PASS/FAIL/NOT_APPLICABLE, plus a FAIL's `ConstraintViolation`) is read directly from the already-computed `CandidateGenerationResult` and wrapped in a `ConstraintCheckExplanation`/`ViolationExplanation` (`com.college.laballocation.scheduling.explanation`) that adds only a display label — the machine `HardConstraintId`/`errorCode` is preserved unchanged alongside it. `ConstraintEngine.evaluate(...)` is never called a second time to produce an explanation. `ConstraintOutcome.NOT_APPLICABLE` (HC-11) is represented as such explicitly, never rendered as if it were `PASS` — see docs/05-SCHEDULING-ENGINE.md "Explainable Allocation."
 
+**Classified by `ConflictClassification` (Phase 13) — structural vs. temporal, never a semantic change:** Phase 13 needed to know which failures changing the *requested time* could plausibly fix. This is purely a categorization layer over the same thirteen error codes above (`com.college.laballocation.scheduling.conflict.ConflictClassification`) — no `SchedulingConstraint` class was touched, no error code was added or renamed, and no HC's pass/fail logic changed in any way.
+
+| Constraint | Error code | Category | Why |
+|---|---|---|---|
+| HC-01 Lab Conflict | `LAB_CONFLICT` | TEMPORAL | A different time may find the lab free |
+| HC-02 Faculty Conflict | `FACULTY_CONFLICT` | TEMPORAL | A different time may find the faculty free |
+| HC-03 Faculty Availability | `FACULTY_UNAVAILABLE` | TEMPORAL | A different time may fall inside an available window |
+| HC-04 Batch Conflict | `BATCH_CONFLICT` | TEMPORAL | A different time avoids the batch's existing session |
+| HC-05 Division-Wide Conflict | `DIVISION_CONFLICT` | TEMPORAL | A different time avoids the division-wide session |
+| HC-06 Lab Availability | `LAB_UNAVAILABLE` | TEMPORAL | A different time may fall outside the unavailability window |
+| HC-07 Capacity | `CAPACITY_VIOLATION` | STRUCTURAL | A lab's capacity does not change by time of day |
+| HC-08 Required Software | `SOFTWARE_MISMATCH` | STRUCTURAL | Installed software does not change by time of day |
+| HC-09 Required Equipment | `EQUIPMENT_MISMATCH` | STRUCTURAL | Installed equipment does not change by time of day |
+| HC-10 Required Lab Type | `LAB_TYPE_MISMATCH` | STRUCTURAL | A lab's type does not change by time of day |
+| HC-11 CR Authorization | `FORBIDDEN_DIVISION_ACCESS` / `CR_ASSIGNMENT_NOT_FOUND` | STRUCTURAL | An authorization fact about the actor, not the time |
+| HC-12 Academic Relationship | `INVALID_ACADEMIC_RELATIONSHIP` | STRUCTURAL | A fact about the request's academic hierarchy, not the time |
+
+A candidate lab is "structurally viable" (`ConflictAnalysis.structurallyViableLabIds()`) iff none of its violations fall in the STRUCTURAL column above — see docs/05-SCHEDULING-ENGINE.md "Conflict Analysis + Alternative Suggestions" for how this single classification drives the entire alternative-time-search decision.
+
 ---
 
 ## Conflict Interaction Matrix (HC-04 / HC-05 combined view)

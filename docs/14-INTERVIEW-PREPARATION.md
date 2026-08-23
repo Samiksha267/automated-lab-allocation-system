@@ -1,6 +1,6 @@
 # Interview Preparation
 
-**Status: mixed.** The Authentication & RBAC, Academic Domain, Laboratory Domain, Subject Requirements, Faculty Availability, Scheduling Domain/Allocation Persistence, Constraint Engine, Candidate Generation, Scoring Engine, and Explainable Allocation sections are verified against real, working Phase 3-12 code. Everything about alternatives, backtracking, FCFS concurrency, and performance benchmarking remains Phase 1 design-level answers, explicitly marked `TO BE VERIFIED AFTER IMPLEMENTATION` — nothing below claims a benchmark, a passing test, or a working demo before those things exist.
+**Status: mixed.** The Authentication & RBAC, Academic Domain, Laboratory Domain, Subject Requirements, Faculty Availability, Scheduling Domain/Allocation Persistence, Constraint Engine, Candidate Generation, Scoring Engine, Explainable Allocation, and Conflict Analysis + Alternative Suggestions sections are verified against real, working Phase 3-13 code. Everything about multi-session backtracking, FCFS concurrency, and performance benchmarking remains Phase 1 design-level answers, explicitly marked `TO BE VERIFIED AFTER IMPLEMENTATION` — nothing below claims a benchmark, a passing test, or a working demo before those things exist.
 
 ## Elevator Pitch (30 seconds)
 
@@ -335,6 +335,34 @@
 **Why is deterministic explainability better than using an LLM?** Because every explanation must be reproducible, auditable, and traceable back to an exact formula or rule - an LLM call would introduce non-determinism, latency, cost, and a layer that could hallucinate a reason unrelated to what the engine actually computed. Every number and reason in an `AllocationRecommendation` is directly attributable to a specific `ConstraintResult` or `ScoreContribution` that already existed before the explanation layer ran.
 
 **How will Phase 13 use rejection reasons?** `RejectedCandidateExplanation.violations()` already tells Phase 13 *why* the originally requested (lab, time) combination didn't work for a given candidate - e.g. "every lab failed `CAPACITY_VIOLATION`" versus "one lab failed only `LAB_UNAVAILABLE`" suggests very different alternative-search strategies. Phase 13 can read this without re-running generation.
+
+## Conflict Analysis + Alternative Suggestions (Phase 13 — implemented, verified answers)
+
+**How does conflict detection work?** `ConflictAnalyzer.analyze(recommendation)` takes an already-computed Phase 12 `AllocationRecommendation` and classifies every rejected candidate's violations as structural or temporal - it never queries the database and never re-runs a constraint. The result, `ConflictAnalysis`, exposes exactly which candidates are "structurally viable" (fail only temporal constraints) and whether alternative-time search is even worth attempting.
+
+**Why don't you implement conflict checks twice?** Because that would create two competing sources of truth about validity. `ConflictAnalyzer` reads only `RejectedCandidateExplanation`/`RejectionSummary` - Phase 12 objects that themselves came from Phase 9's `ConstraintEngine` - and every alternative slot Phase 13 proposes is validated by one more real call to `ExplainableAllocationService.recommend(...)`, the exact same pipeline. There is exactly one place in this entire codebase that decides "is this candidate valid," from Phase 9 through Phase 13.
+
+**How does the system know whether changing time can solve a problem?** By classifying each hard-constraint failure as structural (true at every time of day - capacity, missing software, wrong lab type, academic/authorization facts) or temporal (a lab/faculty/batch/division being occupied, or unavailable, right now - which a different time can genuinely resolve). This is a static lookup table over Phase 9's existing thirteen error codes (docs/06-CONSTRAINTS.md), not a new validity concept.
+
+**What is a structurally viable lab?** A rejected candidate with zero structural failures - it may still fail one or more temporal constraints, but nothing about it is fundamentally wrong for this request. `ConflictAnalysis.structurallyViableLabIds()` is computed directly from already-produced violation lists, with no extra query.
+
+**How do you avoid pointless time searches?** `alternativeTimeSearchWorthwhile()` is simply "at least one candidate is structurally viable." If every rejected candidate has a structural failure (e.g. every lab is too small), no time in the universe can fix that, so the search loop is never entered at all - verified live with `slotsSearched=0` for a genuinely impossible request, and with a dedicated unit test asserting `recommend(...)` was called exactly once (only for the original request).
+
+**How are alternative suggestions ranked?** Lexicographically, never as one merged score: (1) day displacement ascending, (2) time-of-day displacement from the original request ascending, (3) Phase 11's own normalized score descending, (4) lab code ascending as the final deterministic tie-break. A closer, lower-scoring time can and does outrank a farther, higher-scoring one - proven directly with an adversarial fixture (a 20%-score slot 1 hour away beat a 90%-score slot 4 hours away).
+
+**Why prefer same-time alternatives?** Because a different time is more disruptive to a subject/faculty/batch's real schedule than a different lab at the exact same time. In this architecture, "same time, different lab" actually costs nothing extra to check - Phase 10 already evaluates every lab at the requested time as part of building the original recommendation, so if any lab were valid there, the search would already have stopped before ever considering a different time at all.
+
+**How do you prevent alternative-search explosion?** Two independent, configured bounds: at most 6 (day, time) slot combinations are ever run through the full pipeline per search, and at most 3 suggestions are ever returned. `SchedulingSlotProvider` generates its candidate list already sorted and already truncated - no unbounded loop, no "keep searching until found."
+
+**What is the complexity?** `O(min(H*D, maxSlotsSearched) * costOfOneRecommendation)`, where `H` (9 valid start hours/day) and `D` (4 candidate days: same day + 3 lookahead) bound the raw slot count before the configured cap of 6 takes over - a small, fixed multiple of Phase 10/11's own already-documented per-request cost, never combinatorial. No formal benchmark is claimed; only real, informal observations (this document and docs/11-TESTING-STRATEGY.md).
+
+**How are A1/A2 simultaneous sessions handled?** Exactly as Phase 9-12 already established: a real, persisted A1 (BDA) session does not block A2 (CNS) at the same time, because A2 uses a different faculty and a different lab - verified live by persisting a genuine A1 allocation and confirming A2 still receives `ALTERNATIVES_NOT_NEEDED` with its own valid, different-lab recommendation, never a false `DIVISION_CONFLICT`.
+
+**What is the difference between Phase 13 alternatives and Phase 14 backtracking?** Phase 13 searches alternative times/labs for *one* request in isolation, never touching any other already-scheduled session. Phase 14 (not yet built) will consider *multiple* sessions together and may reconsider or move an already-placed tentative assignment while solving a larger schedule. Phase 13 never moves an existing `Allocation` - it only proposes new, independently-valid possibilities.
+
+**Are alternatives guaranteed to remain free?** No - every result here, exactly like Phase 12's recommendation, is a snapshot taken during one read-only transaction. Another request could occupy the same lab/time before any future booking actually commits. Phase 16 owns the real concurrency-safe revalidation at commit time; Phase 13 is advisory decision support only, never a reservation.
+
+**Why doesn't Phase 13 persist allocations?** Because nothing has been decided yet - a suggestion is a possibility, not a booking. Verified live: the `allocation` table's row count was identical before and after every `findAlternatives(...)` call across all required scenarios.
 
 ## Real Engineering Problems Encountered
 

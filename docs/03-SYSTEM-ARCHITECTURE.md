@@ -763,3 +763,48 @@ No changes to Phase 9/10/11 classes - `ConstraintEngine`, `CandidateGenerator`, 
 ### Verified end-to-end (Dockerized, 2026-08-23)
 
 A temporary `@Profile("dev")`-only `ApplicationRunner` (`DevExplanationVerificationRunner`, deleted after use, same safe pattern as Phase 9/10/11's) exercised the real `ExplainableAllocationService` against the real dev-seeded BDA/CNS demo data over live Docker/Postgres. All required scenarios matched: the BDA recommendation selected C-202 (rank 1, `39.58/60.0`) with B-201 and B-301 preserved as ranked "other valid candidates," and C-304 correctly rejected with `SOFTWARE_MISMATCH` and absent from the ranking entirely (hard-vs-soft proof); a pairwise `ScoreComparison` between C-202 and B-201 correctly attributed the ranking difference to `PREFERRED_LAB_TYPE` (+15) outweighing a `CAPACITY_FIT` deficit (-4.22); temporarily inflating batch A1's strength produced `NO_VALID_CANDIDATE` with a null recommendation and a factual summary ("15 candidate(s) evaluated, 15 rejected, most common reason CAPACITY_VIOLATION"), never an exception; CNS (zero subject preferences) produced an exact tie between B-202 and D-202, both correctly reported at applicable-max `45.0` (not `60.0` - `PREFERRED_LAB_TYPE` correctly `NOT_APPLICABLE` and excluded from the denominator); and a real, persisted A1 allocation on B-301 caused A2's own recommendation to correctly reject B-301 with `LAB_CONFLICT` specifically (never a fabricated `DIVISION_CONFLICT`), while still recommending a different, genuinely free lab. Confirmed via `psql` afterward that every temporary mutation (the inflated batch strength, the persisted A1 test allocation) was fully reverted. Regression re-verified: all Phase 3-11 endpoints still 200; `/api/allocations` still 404 both directions; Flyway still at schema version 10; dev-seeded lab count confirmed 15.
+
+## 21. Phase 13 — Conflict Detection + Alternative Suggestions (implemented)
+
+### Pipeline
+
+```mermaid
+flowchart TD
+    Req[SchedulingRequest] --> EX[ExplainableAllocationService.recommend - Phase 12, unmodified]
+    EX --> Rec[AllocationRecommendation]
+    Rec --> CA[ConflictAnalyzer.analyze - pure transformation]
+    CA --> Analysis["ConflictAnalysis: structurallyViableLabIds, conflicts, rejectionSummary"]
+    Analysis -->|alternativeTimeSearchWorthwhile == false| NoSearch[NO_ALTERNATIVE_FOUND - search never attempted]
+    Analysis -->|worthwhile == true| Slots[SchedulingSlotProvider.generateCandidateSlots - bounded, ordered]
+    Slots --> Loop["for each candidate slot (up to 6): build new SchedulingRequest, call ExplainableAllocationService.recommend again"]
+    Loop --> Rank[Rank suggestions: day offset, time displacement, Phase 11 score, lab code]
+    Rank --> Result[AlternativeSearchResult]
+```
+
+`AlternativeSuggestionService` depends only on `ExplainableAllocationService` (Phase 12) - the dependency graph stays a clean, acyclic layered stack; `ExplainableAllocationService` has no knowledge this class exists. No constraint or score is ever recomputed - every alternative slot is validated by one more real call into the unmodified Phase 10/11/12 pipeline. See docs/05-SCHEDULING-ENGINE.md for full architecture, structural-vs-temporal classification, slot policy, ranking, and complexity.
+
+### New backend additions (Phase 13)
+
+```
+com.college.laballocation.scheduling.conflict/       ConflictAnalyzer (@Component)
+                                                        ConflictAnalysis / ConflictDetail / ConflictCategory
+                                                        ConflictClassification (structural/temporal lookup)
+com.college.laballocation.scheduling.alternative/     AlternativeSuggestionService (@Service)
+                                                        SchedulingSlotProvider (@Component) / SchedulingSlotPolicy (@Component, app.scheduling.* config)
+                                                        CandidateSlot / AlternativeSuggestion / AlternativeSearchResult
+                                                        AlternativeType / AlternativeSearchStatus
+```
+
+No new migration - Phase 13 is entirely transient algorithmic behavior against the existing Phase 8-12 schema and services, confirmed live: Flyway remained at schema version 10 after this phase's work.
+
+### Slot rules were collected from the user, not invented
+
+Per the phase brief's explicit stop condition (its PART 75), the repository was searched exhaustively for authoritative college scheduling-slot rules before writing any time-search code - none existed anywhere (docs/ASSUMPTIONS.md A-35). Rather than fabricate college hours, the missing rules (working days, daily start/end times, session duration, whether cross-day search is allowed, and how far to look ahead) were requested directly from the user and are now centralized in `SchedulingSlotPolicy`. Conflict analysis, structural-viability classification, and same-time-different-lab resolution (which needs no slot policy at all - see docs/05-SCHEDULING-ENGINE.md) were fully implementable independent of this and are complete regardless.
+
+### No production alternative-search API
+
+`AlternativeSuggestionService` remains internal, same as `CandidateGenerator`/`ScoringEngine`/`ExplainableAllocationService` - no `POST /api/scheduling/alternatives` or equivalent was added (PART 44/81 of the phase brief: keep it internal unless an endpoint materially improves verification/demo - manual Docker verification via a temporary dev harness already did, without adding new production surface area). Phase 15 is still where a real CR-facing endpoint belongs.
+
+### Verified end-to-end (Dockerized, 2026-08-23)
+
+A temporary `@Profile("dev")`-only `ApplicationRunner` (`DevAlternativeVerificationRunner`, deleted after use, same safe pattern as Phase 9-12's) exercised the real `AlternativeSuggestionService` against the real dev-seeded BDA/CNS demo data over live Docker/Postgres. All required scenarios matched: occupying B-301 with a different batch/faculty (CNS/A2) at the requested BDA/A1 time resolved via same-time-different-lab (`C-202` recommended), needing zero alternative-time search; requesting BDA/A1 during Faculty BDA's real seeded Monday 12:00-14:00 unavailability gap correctly produced `NO_VALID_CANDIDATE` with 3 structurally-viable Cloudera labs (`[9, 3, 5]`) and found a real alternative (`10:00-12:00 C-202`, the closest valid time) - simultaneously proving the required "mixed structural+temporal" case, since the same run's rejected candidates included both software-only-structural and faculty-only-temporal failures; persisting a genuine batch-A1 session at the requested time (batch conflict) forced every lab to fail `BATCH_CONFLICT` uniformly and still found a valid later time; temporarily inflating batch A1's strength made every candidate structurally impossible and confirmed `slotsSearched=0` - the time-search loop was never entered at all; and a real, persisted A1 (BDA) session at 09:00-11:00 did not prevent A2 (CNS) from receiving its own valid same-time recommendation on a different lab (`D-101`), proving no false `DIVISION_CONFLICT`. The `allocation` table's row count was confirmed identical before and after the full run via `psql`, and every temporary mutation (persisted test allocations, the inflated batch strength) was reverted immediately after its own scenario rather than batched at the end, after an initial verification pass caught cross-scenario contamination from batched cleanup (documented in the completion report's Real Bugs Found). Regression re-verified: all Phase 3-12 endpoints still 200; `/api/allocations` still 404 both directions; Flyway still at schema version 10; dev-seeded lab count confirmed 15.
