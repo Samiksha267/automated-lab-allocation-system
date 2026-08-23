@@ -671,3 +671,57 @@ ADR-style log of significant, hard-to-reverse decisions. Each entry: Context, De
 **Reasons:** `SchedulingConstraint` is an interface because it has twelve real implementations dispatched over polymorphically by `ConstraintEngine` - genuine value from the abstraction. `CandidateGenerator` has exactly one implementation and no dispatch requirement, the same situation `SchedulingContextFactory` and `CandidateAllocationFactory` (Phase 8/9) were already in as concrete classes. Adding an interface here would be ceremony with no consumer, which this project's working rules explicitly discourage (PART 34: "do not create interfaces solely for ceremony").
 
 **Trade-offs:** None significant - if a second implementation is ever genuinely needed (e.g. a caching or bulk-optimized variant), extracting an interface at that point is a small, mechanical refactor with no design cost paid today for a need that may never arrive.
+
+---
+
+## ADR-049: Three Soft-Scoring Factors Deferred — No Data Was Invented to Manufacture Them
+
+**Context:** docs/07-ALLOCATION-SCORING.md's original design proposed six weighted factors. Phase 11's mandatory pre-implementation readiness analysis (its brief's PART 1) had to decide, for each, whether real data actually backs it in the current schema, or whether implementing it would require fabricating a proxy.
+
+**Decision:** Additional Environment Fit, Faculty Preference, and Fewer Timetable Gaps are deferred - no `AllocationScorer` bean, no configured weight, and critically no new table/column was added to manufacture data for them. Additional Environment Fit has no "preferred/recommended software" concept anywhere (only all-required software/equipment joins); Faculty Preference has only `FacultyAvailability` (allowed windows, not a preference); Fewer Timetable Gaps is structurally meaningless while every candidate in one `CandidateGenerationResult` (Phase 10) shares the exact same date/time - only the lab varies, so no lab choice can change a gap.
+
+**Alternatives considered:** Treating `FacultyAvailability` as a preference proxy (rejected - availability means "allowed," not "desirable," and conflating them would mislead scoring toward a meaning the data was never recorded for). Counting installed-software quantity as an "environment fit" proxy (rejected - more unrelated software on a lab is not a real quality signal; PART 16 of the brief explicitly prohibits this). Adding new schema (a `faculty_preference` table, a `subject_preferred_software` join, an `operating_hours` config) specifically to unlock these factors (rejected - PART 66 of the brief: the phase's objective is truthful optimization using existing data, not manufacturing enough tables to reach a target score of 100).
+
+**Reasons:** A fabricated score is worse than an honestly absent one - it would look like a real preference signal to anyone reading a `ScoreContribution`, when it would actually be measuring something unrelated or nonexistent. `ScoringFactorId` keeps all six as stable enum constants specifically so a future phase, once real data exists, can register a scorer bean without an ID-numbering change.
+
+**Trade-offs:** The enabled scoring model totals 60 points, not the originally sketched 100 - accepted; docs/07-ALLOCATION-SCORING.md is explicit that the denominator was never a fixed 100, and `ScoringEngine` computes each candidate's applicable maximum from whichever factors actually registered a bean, never a hardcoded constant.
+
+---
+
+## ADR-050: Balanced Utilization Is a Relative (Min-Max Normalized) Comparison, Never an Absolute Percentage
+
+**Context:** The original design sketch computed utilization as `allocatedMinutes / availableMinutes`, implying a true percentage. Phase 11's readiness analysis found no working-days/daily-operating-hours concept exists anywhere in the schema or configuration to serve as that denominator.
+
+**Decision:** `BalancedUtilizationScorer` compares each candidate lab's scheduled minutes (within the term's currently `PUBLISHED` `ScheduleVersion`) only to the *other candidate labs in the same scoring run* - min-max normalized (`(maxLoad - candidateLoad) / (maxLoad - minLoad)`), never divided by any notion of "available" time.
+
+**Alternatives:** Inventing a fixed institutional operating-hours config (e.g. "09:00-17:00, 6 days") to compute a true percentage was considered and rejected - it would be an arbitrary, unverified assumption about how this specific college actually operates, not a real institutional fact anyone provided. The brief's own PART 22 example formula (ratio against the single most-loaded lab, forcing it to exactly zero) was also considered and rejected in favor of min-max normalization, since the most-loaded candidate being forced to zero regardless of how close the rest of the field is felt unstable and poorly explainable.
+
+**Reasons:** A relative comparison is exactly what "balanced" means for this factor's purpose - spreading load across the candidate pool - and doesn't require asserting a fact (operating hours) nobody actually confirmed. Min-max normalization stays bounded `[0, weight]` and degrades gracefully (full credit for everyone) when every candidate is equally loaded, including the common all-zero case.
+
+**Trade-offs:** The factor cannot answer "is this lab busy in absolute terms," only "is this lab busier than its peers right now" - acceptable, since ranking candidates relative to each other is the actual job this factor does inside `ScoringEngine`.
+
+---
+
+## ADR-051: `ScoringContext` Introduced as a Second, Narrower Context Alongside `SchedulingContext`
+
+**Context:** `AllocationScorer.score(...)` needs candidate-independent data the same way `SchedulingConstraint.evaluate(...)` does, but Balanced Utilization additionally needs data that is inherently *relative across the whole valid-candidate set being scored this run* (the min/max scheduled-load), which no single candidate's `SchedulingContext` can supply on its own.
+
+**Decision:** A new `ScoringContext` record wraps the existing `SchedulingContext` (unchanged, reused as-is) plus the per-lab scheduled-minutes map and its precomputed min/max, assembled once per `ScoringEngine.score(...)` call and passed to every scorer.
+
+**Alternatives:** Extending `SchedulingContext` itself with scoring-specific fields (rejected - `SchedulingContext` is Phase 8/9 infrastructure also consumed by `ConstraintEngine`; adding scoring-only fields to it would blur its established candidate-independent-data-for-constraints role). Giving `AllocationScorer.score(...)` a raw `Map<Long,Long>` parameter instead of a wrapper type (rejected - `CapacityFitScorer`/`PreferredLabTypeScorer` don't need it at all, and a bare map parameter every scorer must accept but most ignore is a worse interface than one cohesive context object, mirroring `SchedulingContext`'s own "load once, reuse across every candidate" role one layer up).
+
+**Reasons:** Keeps `SchedulingContext` exactly as Phase 8/9 left it (no cross-phase modification without a real reason) while still avoiding one utilization query per candidate - `ScoringEngine` computes the min/max exactly once for the whole run, not once per scorer invocation.
+
+**Trade-offs:** One more small type in the codebase - accepted; it is a plain data holder like `SchedulingContext`, performs no queries itself, and only `BalancedUtilizationScorer` reads the parts beyond `schedulingContext()`.
+
+---
+
+## ADR-052: The Phase 10 "16-Lab" Figure Was Stale Docker Volume Data, Not a Seeder Defect
+
+**Context:** Phase 10's original completion report observed 16 labs where the seeded dataset should have 15. Phase 11's mandatory pre-phase investigation (its brief's PART 2) required determining the exact cause before writing any scoring code that might otherwise silently encode a wrong assumption about the lab pool.
+
+**Decision:** Investigated via direct SQL against the live Docker Postgres volume rather than guessing: `SELECT id, code, created_at FROM lab ORDER BY id` showed labs 1-15 all created within the same second (`DevLabSeeder`'s single transactional run) and a 16th, `E-101`, created roughly 27 minutes later on a different day - clearly a manually-created row from an earlier ad-hoc verification session, never cleaned up because the Docker named volume (`postgres-data`) persists across `docker compose down`/`up` cycles unless `-v` is explicitly passed. `DevLabSeeder` itself was re-read and confirmed already fully idempotent (`findByCode(...).orElseGet(...)` for every entity it creates) - it was never capable of producing a 16th row on its own. Verified `E-101` had zero dependent rows in `allocation`/`lab_software`/`lab_equipment`/`lab_unavailability` before deleting it; lab count is now confirmed 15 via both direct SQL and `GET /api/labs`.
+
+**Reasons:** Distinguishing "the seeder has a bug" from "stale local environment state" matters - fixing the wrong thing (e.g. adding defensive dedup logic to an already-idempotent seeder) would have been a wasted, misleading change. The real fix was data hygiene, not code.
+
+**Trade-offs:** None - this is a one-time cleanup of local development state, not a schema or application-code change. Documented here so a future phase encountering an unexpected lab count in a long-lived local Docker volume knows to check for stale manual-verification leftovers before assuming a seeder regression.

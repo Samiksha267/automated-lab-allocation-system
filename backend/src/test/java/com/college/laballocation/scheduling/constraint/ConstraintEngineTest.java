@@ -166,7 +166,7 @@ class ConstraintEngineTest {
         ConstraintEngine engine = new ConstraintEngine(allConstraints);
         SchedulingContext context = new SchedulingContext(
                 simpleRequest(),
-                new SubjectRef(3L, "CNS", "Computer Networks & Security", 10L, null),
+                new SubjectRef(3L, "CNS", "Computer Networks & Security", 10L, null, null),
                 new FacultyRef(4L, "FAC-CNS", "Faculty CNS", true),
                 new DivisionRef(1L, "A", 68, 10L),
                 new BatchRef(2L, "A2", 23, 1L),
@@ -240,7 +240,7 @@ class ConstraintEngineTest {
     private SchedulingContext simpleBatchContext() {
         return new SchedulingContext(
                 simpleRequest(),
-                new SubjectRef(3L, "BDA", "Big Data Analytics", 10L, null),
+                new SubjectRef(3L, "BDA", "Big Data Analytics", 10L, null, null),
                 new FacultyRef(4L, "FAC-BDA", "Faculty BDA", true),
                 new DivisionRef(1L, "A", 68, 10L),
                 new BatchRef(2L, "A1", 23, 1L),

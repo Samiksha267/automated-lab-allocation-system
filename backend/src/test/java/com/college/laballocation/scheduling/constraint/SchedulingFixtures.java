@@ -64,7 +64,7 @@ final class SchedulingFixtures {
     }
 
     static SubjectRef subjectRef(Long academicYearId, Long requiredLabTypeId) {
-        return new SubjectRef(SUBJECT_ID, "BDA", "Big Data Analytics", academicYearId, requiredLabTypeId);
+        return new SubjectRef(SUBJECT_ID, "BDA", "Big Data Analytics", academicYearId, requiredLabTypeId, null);
     }
 
     static FacultyRef facultyRef() {

@@ -77,7 +77,7 @@ class CandidateGeneratorTest {
     private SchedulingContext context() {
         return new SchedulingContext(
                 request(),
-                new SubjectRef(3L, "BDA", "Big Data Analytics", 10L, null),
+                new SubjectRef(3L, "BDA", "Big Data Analytics", 10L, null, null),
                 new FacultyRef(4L, "FAC-BDA", "Faculty BDA", true),
                 new DivisionRef(1L, "A", 68, 10L),
                 new BatchRef(2L, "A1", 23, 1L),

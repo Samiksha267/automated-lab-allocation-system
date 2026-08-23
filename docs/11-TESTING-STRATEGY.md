@@ -51,6 +51,36 @@ No test result is ever claimed without actually running the suite (project worki
 
 **Manually verified against the Dockerized stack (2026-08-22):** all 8 of the phase brief's required scenarios (A–H — lab creation, unauthorized mutation, invalid capacity, duplicate code, Cloudera filter, capacity filter, combined filter, invalid unavailability interval) executed with real `curl` requests against the running containers, plus a restart-and-recount idempotency check on the dev seed data (15 labs → 16 after one test-created lab, software/lab_software/lab_equipment row counts unchanged across the restart).
 
+## Scoring Engine Tests — Implemented (Phase 11)
+
+| Test | Class | What it proves |
+|---|---|---|
+| Exact capacity match, slightly-larger, much-larger, and closer-always-outranks-larger | `CapacityFitScorerTest` | `fitRatio`/formula boundaries hold; a closer fit always outscores a larger capacity |
+| Division-targeted request compares against division strength, not batch | `CapacityFitScorerTest` | `CapacityFitScorer` independently re-derives HC-07's target-strength logic correctly |
+| Score always within `[0, weight]` bounds | `CapacityFitScorerTest` | No formula edge case escapes the documented range |
+| Matching / mismatched / no-preference-recorded | `PreferredLabTypeScorerTest` | Full credit on match, zero-but-`APPLIED` on mismatch, `NOT_APPLICABLE` (excluded from max) with no preference |
+| No `PUBLISHED` schedule version is `NOT_APPLICABLE` | `BalancedUtilizationScorerTest` | No basis for comparison is honestly reported, never a fabricated zero |
+| Least-loaded lab scores higher than most-loaded | `BalancedUtilizationScorerTest` | Min-max normalization orders labs correctly |
+| All loads equal (including all-zero) scores full weight, no divide-by-zero | `BalancedUtilizationScorerTest` | The `maxLoad == minLoad` branch is exercised directly |
+| Score always within `[0, weight]` bounds | `BalancedUtilizationScorerTest` | Same boundary guarantee as capacity fit |
+| `ScoreContribution` invariants: awarded ≤ max, awarded ≥ 0, `NOT_APPLICABLE` must be 0/0, immutable details map | `ScoreContributionTest` | The record's compact constructor actually enforces PART 62's invariants, not just documents them |
+| Only valid candidates are scored | `ScoringEngineTest` | An invalid candidate mixed into a fixture is absent from `rankedCandidates()` |
+| Empty valid set returns empty ranking, not an exception | `ScoringEngineTest` | All-invalid fixture completes normally |
+| Scores summed across all registered scorers | `ScoringEngineTest` | `totalScore`/`maxPossibleScore` correctly aggregate multiple stub scorers |
+| `NOT_APPLICABLE` factor excluded from max-possible score | `ScoringEngineTest` | A not-applicable contribution never inflates or deflates the denominator |
+| Ranking is descending by normalized score | `ScoringEngineTest` | Sort order is correct with unequal applicable maxima |
+| Tied scores break deterministically by lab code ascending | `ScoringEngineTest` | No nondeterministic ordering on a genuine tie |
+| Contribution breakdown preserved per candidate | `ScoringEngineTest` | Every registered factor's `ScoreContribution` survives into the final `ScoredCandidate` |
+| All valid candidates are scored, none skipped, when mixed with invalid ones | `ScoringEngineTest` | Mixed valid/invalid fixture scores exactly the valid subset |
+| Capacity fit differentiates otherwise-equal candidates | `ScoringEngineIT` (Testcontainers, environment-blocked here) | Real persisted labs of differing capacity rank correctly through the full generate→score pipeline |
+| Preferred lab type differentiates two otherwise-valid candidates | `ScoringEngineIT` | Real `Subject.preferredLabType` data drives a real ranking difference |
+| Invalid candidate never ranked regardless of soft factors | `ScoringEngineIT` | The hard-vs-soft guarantee, proven against real persisted data with an adversarial fixture |
+| Zero valid candidates produces empty ranking, not an exception | `ScoringEngineIT` | Real-data equivalent of the unit-level zero-valid test |
+| Balanced utilization prefers the less-loaded lab | `ScoringEngineIT` | Real `Allocation` rows against a real `PUBLISHED` `ScheduleVersion` drive a real ranking difference |
+| BDA ranking orders Cloudera-capable labs by capacity fit | `ScoringEngineIT` | Real seeded-shape BDA scenario, generation + scoring together |
+
+**Manually verified against the Dockerized stack (2026-08-23), via a temporary `@Profile("dev")`-only `ApplicationRunner` (`DevScoringVerificationRunner`) deleted after use (no production scoring API was added just to test this):** BDA ranking (batch A1, required capacity 23) produced C-202 first (Data-Engineering-typed, Cloudera-capable, `39.58/60.0`) ahead of B-201 (`28.8/60.0`) and B-301 (`24.86/60.0`) - Preferred Lab Type credit outweighing a looser capacity fit, a genuine soft-factor interaction; C-304 (no Cloudera) confirmed invalid and never ranked despite matching preferred type and having workable capacity (hard-vs-soft proof); temporarily inflating batch A1's strength produced an empty ranking with zero valid candidates, no exception; the same request scored twice produced an identical order (determinism); CNS (zero subject requirements) against B-202/D-202 (identical capacity 60, identical type) produced an exact tie (`26.5` each) broken deterministically by lab code (B-202 before D-202); temporarily loading D-202 with five extra sessions dropped its score to `11.5` against B-202's unchanged `26.5`, then all five temporary allocations were deleted, confirmed via `psql` (zero leftover rows, batch A1 strength restored to 23). Regression re-verified: all Phase 3-10 endpoints still `200`; `/api/allocations` still `404` both directions; Flyway still at schema version 10; dev-seeded lab count confirmed 15 (see docs/15-DESIGN-DECISIONS.md for the stray `E-101` row cleanup).
+
 ## Candidate Generation Tests — Implemented (Phase 10)
 
 | Test | Class | What it proves |

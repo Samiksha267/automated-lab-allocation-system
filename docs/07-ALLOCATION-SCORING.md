@@ -2,7 +2,20 @@
 
 Scoring only ever ranks candidates that have **already passed every hard constraint** in [06-CONSTRAINTS.md](06-CONSTRAINTS.md). A candidate that fails a hard constraint is never scored — it is removed before scoring runs. This separation is the single most important rule in this document: **hard constraints gate eligibility; scoring only orders what's already eligible.**
 
-**Status (Phase 6):** the data this document's factors will read now exists and is independently verified — `subject.required_lab_type_id` (hard, HC-10) and `subject.preferred_lab_type_id` (soft, this document) are both real, distinct, mutually-exclusive columns (enforced by application code and a database CHECK constraint — see docs/04-DATABASE-DESIGN.md §5), so the "Preferred Lab Type" factor below is no longer just a design placeholder; it has a real field to read once the scoring engine itself is built (Phase 11). No scoring *code* exists yet — this remains a design document until then.
+**Status (Phase 11):** A real, tested `ScoringEngine` now exists (`com.college.laballocation.scheduling.scoring`). Before writing any scorer, Phase 11 re-inspected every factor below against the actual repository (not this document's aspirations) and produced the readiness matrix in the next section. Three factors turned out to be genuinely implementable with real data — **Capacity Fit**, **Preferred Lab Type**, **Balanced Utilization** — and are implemented, tested (unit + environment-blocked IT + manual Docker), and documented below with their *actual* formulas. Three were deferred because no underlying data exists anywhere in the schema - **Additional Environment Fit**, **Faculty Preference**, **Fewer Timetable Gaps** - and no table/column was invented to manufacture them (see docs/15-DESIGN-DECISIONS.md ADR-049/050/051).
+
+## Readiness Matrix (Phase 11)
+
+| Factor | Original Weight | Readiness | Implemented? | Reason |
+|---|---:|---|---|---|
+| Capacity Fit | 30 | READY | ✅ `CapacityFitScorer` | `lab.capacity` and the request's target strength (`batch.strength`/`division.strength`) are both real, already-validated fields. |
+| Additional Environment Fit | 20 | NOT_READY | ❌ deferred | No "preferred/recommended software" concept exists anywhere in the schema - `SubjectSoftwareRequirement`/`SubjectEquipmentRequirement` are all-required, all-or-nothing joins. Awarding points for a lab simply having *more* installed software (unrelated to the subject) would be meaningless, not a real quality signal - explicitly prohibited (PART 15/16 of the Phase 11 brief). |
+| Preferred Lab Type | 15 | READY | ✅ `PreferredLabTypeScorer` | `subject.preferredLabTypeId` is a real, distinct column from `subject.requiredLabTypeId` (HC-10), enforced mutually exclusive since Phase 6. |
+| Balanced Utilization | 15 | READY (relative, not a percentage) | ✅ `BalancedUtilizationScorer` | Real `Allocation` rows exist and can be summed per lab. No working-days/daily-operating-hours concept exists to compute a true utilization *percentage* against, so the factor compares candidate labs' scheduled minutes *to each other* (min-max normalized), never claims an absolute utilization figure. |
+| Faculty Preference | 10 | NOT_READY | ❌ deferred | Only `FacultyAvailability` (allowed windows) exists - there is no persisted `FacultyPreference`/preferred-lab concept. Treating availability as preference would be a fabricated proxy, explicitly prohibited (PART 26 of the Phase 11 brief). |
+| Fewer Timetable Gaps | 10 | NOT_READY / NOT_APPLICABLE at this architecture stage | ❌ deferred | Every candidate inside one `CandidateGenerationResult` shares the exact same `date`/`startTime`/`endTime` (Phase 10) - only the lab varies. Changing the lab cannot change a timetable gap, so this factor is structurally meaningless until Phase 13/14 introduces alternative time slots. |
+
+**Effective enabled weight today: 60** (30 + 15 + 15), not 100 - `ScoringEngine` never assumes a fixed denominator; see "Score Semantics" below.
 
 ## Why the original starting weights needed critical revision
 
@@ -23,66 +36,85 @@ Fewer Gaps            10
 
 ## Finalized Scoring Model
 
-| Factor | Weight | What it measures |
-|---|---:|---|
-| **Capacity Fit** | 30 | How closely lab capacity matches required strength, without wasting an oversized lab |
-| **Additional Environment Fit** | 20 | Non-required but subject-relevant extra software/equipment present (0 if none defined for the subject — never re-checks required software) |
-| **Preferred Lab Type** | 15 | Whether the lab type matches a subject's *soft* type preference distinct from `required_lab_type_id` (see note below) — if the subject has a hard `required_lab_type_id`, this factor also degrades to a constant (every remaining candidate already matches it via HC-10), so in the common case this factor differentiates only when a subject has a *preferred-but-not-required* type, a concept added specifically so this scorer isn't redundant with HC-10 |
-| **Balanced Utilization** | 15 | Rewards less-utilized labs to spread load across the ~15-lab pool |
-| **Faculty Preference** | 10 | If a faculty has a recorded preferred lab (future-extensible field, optional), reward matching it |
-| **Fewer Timetable Gaps** | 10 | Rewards a lab/time choice that minimizes idle gaps in the faculty's or batch's existing daily schedule |
+| Factor | Weight | Status | What it measures |
+|---|---:|---|---|
+| **Capacity Fit** | 30 | ✅ Implemented | How closely lab capacity matches required strength, without wasting an oversized lab |
+| **Additional Environment Fit** | 20 | ❌ Deferred (no data) | Non-required but subject-relevant extra software/equipment present — deferred, no "preferred software" concept exists |
+| **Preferred Lab Type** | 15 | ✅ Implemented | Whether the lab type matches a subject's *soft* type preference distinct from `required_lab_type_id` — `NOT_APPLICABLE` (excluded from the applicable max) when the subject records no preference at all |
+| **Balanced Utilization** | 15 | ✅ Implemented (relative) | Rewards a less-scheduled lab relative to the other candidate labs this run — never an absolute percentage |
+| **Faculty Preference** | 10 | ❌ Deferred (no data) | Only `FacultyAvailability` (allowed windows) exists — no persisted lab/time preference |
+| **Fewer Timetable Gaps** | 10 | ❌ Deferred (not applicable yet) | Structurally meaningless while every candidate shares one fixed date/time — becomes real once Phase 13/14 offers alternative slots |
 
-Total: 100. Weights live in application configuration (e.g. `application.yml` under a `scoring:` section or a `scoring_weight_config` table if runtime-tunability by the Lab Assistant is wanted later), never as scattered magic numbers in scorer classes.
+**Enabled weight today: 60** (30 + 15 + 15) — not 100. Weights live in application configuration (`application.yml`'s `app.scoring.*`, injected via `ScoringConfiguration`, following this project's existing constructor-`@Value` convention rather than `@ConfigurationProperties`), never as scattered magic numbers in scorer classes. Only the three implemented factors have a configured weight — no weight was manufactured for a deferred factor.
 
-### Capacity Fit — exact formula
+### Capacity Fit — actual implemented formula (`CapacityFitScorer`)
 
-Given `required = strength`, `capacity = lab.capacity` (already guaranteed `capacity >= required` by HC-07):
-
-```
-fit = 1 - (capacity - required) / capacity
-score = round(30 * fit)
-```
-
-This rewards the *closest-fit* lab (per PART 26's explicit example: batch of 64 → Lab A(65) should outrank Lab C(150)), never the largest.
-
-### Balanced Utilization — exact formula
+Given `required` = the request's target strength (`batch.strength` for a `BATCH` request, `division.strength` for `DIVISION` - the same target HC-07 already validated `capacity >= required` against) and `capacity = lab.capacity`:
 
 ```
-utilization(lab) = allocatedMinutes(lab, lookbackWindow) / availableMinutes(lab, lookbackWindow)
-score = round(15 * (1 - utilization(lab)))
+fitRatio = required / capacity
+score = capacityFitWeight * fitRatio
 ```
 
-`availableMinutes` is derived from the institution's operating hours (e.g. 09:00–17:00, 6 working days) over a configurable lookback window (default: current term-to-date). Lower utilization → higher score, spreading load rather than always picking the same convenient lab.
+Since every valid candidate satisfies `capacity >= required > 0`, `fitRatio` is always in `(0, 1]`, so `0 < score <= weight` - no rounding-to-zero edge case, no division by zero. This rewards the *closest-fit* lab, never the largest: required 68, capacity 70 scores far higher than required 68, capacity 150.
 
-### Fewer Timetable Gaps — exact formula
+### Preferred Lab Type — actual implemented formula (`PreferredLabTypeScorer`)
 
 ```
-gap(candidate) = minutes between the end of the batch's/faculty's nearest earlier session that day and the candidate start,
-                  plus minutes between candidate end and the start of the nearest later session that day
-score = round(10 * (1 - normalizedGap))   where normalizedGap is clamped to [0,1] against a configurable max-relevant-gap (default 120 min)
+if subject.preferredLabTypeId == null:
+    NOT_APPLICABLE (0 of 0 - excluded from the applicable maximum entirely)
+elif candidate.lab.labTypeId == subject.preferredLabTypeId:
+    score = preferredLabTypeWeight   (full credit)
+else:
+    score = 0   (still APPLIED - counted toward the applicable maximum, candidate remains valid)
 ```
 
-## Explainability Output
+### Balanced Utilization — actual implemented formula (`BalancedUtilizationScorer`, backed by `LabUtilizationService`)
 
-Every scored candidate returns a structured breakdown, not just a number:
+`LabUtilizationService` sums each candidate lab's scheduled minutes (`REGULAR` and `EXTRA` allocations alike, `AllocationStatus.blocksScheduling()` statuses only) within the requesting term's currently `PUBLISHED` `ScheduleVersion` - one grouped SQL query for the whole candidate set, not one query per lab. If the term has no `PUBLISHED` version at all, the factor is `NOT_APPLICABLE` for every candidate (no basis for comparison). Otherwise, min-max normalized across the candidate set actually being scored this run:
+
+```
+minLoad = min(scheduledMinutes(lab) for lab in candidateLabs)
+maxLoad = max(scheduledMinutes(lab) for lab in candidateLabs)
+
+if maxLoad == minLoad:
+    score = balancedUtilizationWeight   (every candidate equally loaded - full credit for all, never a divide-by-zero)
+else:
+    score = balancedUtilizationWeight * (maxLoad - candidateLoad) / (maxLoad - minLoad)
+```
+
+This was chosen over a simpler "ratio against the single most-loaded lab" formula specifically because that alternative forces the most-loaded candidate to exactly zero regardless of how close the rest of the field is - min-max normalization stays bounded `[0, weight]` and degrades gracefully when every candidate is equally (or zero) loaded. Deliberately a *relative* comparison among candidate labs, never an absolute utilization percentage - no working-days/daily-operating-hours concept exists anywhere in this project to compute one against.
+
+### Additional Environment Fit / Faculty Preference / Fewer Timetable Gaps — deferred, no formula implemented
+
+No scorer bean exists for these three (see the Readiness Matrix above) - registering a fake scorer that always returns a constant, or fabricating a formula against data that doesn't exist, was explicitly prohibited (PART 45/16/26 of the Phase 11 brief). Their `ScoringFactorId` enum constants remain reserved for whichever future phase gives them real, non-fabricated data to read.
+
+## Explainability Output — actual `ScoredCandidate` shape (Phase 11)
+
+Every scored candidate carries a structured breakdown, not just a number - this is `ScoredCandidate`/`ScoreContribution` as actually implemented, a real BDA scenario observed live in Docker (2026-08-23; Division A strength 68, Batch A1 strength 23, subject BDA prefers `DATA_ENGINEERING`):
 
 ```json
 {
-  "labId": 304,
-  "totalScore": 92,
-  "breakdown": [
-    { "factor": "CAPACITY_FIT", "score": 27, "max": 30, "explanation": "Capacity 72, required 68 — tight fit" },
-    { "factor": "ADDITIONAL_ENVIRONMENT_FIT", "score": 20, "max": 20, "explanation": "Cloudera required and present; Python also available" },
-    { "factor": "BALANCED_UTILIZATION", "score": 13, "max": 15, "explanation": "Utilization 24% this term, below average" }
+  "labCode": "C-202",
+  "totalScore": 39.58,
+  "maxPossibleScore": 60.0,
+  "normalizedScore": 0.6597,
+  "contributions": [
+    { "factor": "CAPACITY_FIT", "applicability": "APPLIED", "pointsAwarded": 9.58, "maxPoints": 30.0, "explanation": "Lab capacity 72 for required capacity 23 (fit ratio 0.3194)." },
+    { "factor": "PREFERRED_LAB_TYPE", "applicability": "APPLIED", "pointsAwarded": 15.0, "maxPoints": 15.0, "explanation": "Lab type (DATA_ENGINEERING) matches the subject's preferred lab type." },
+    { "factor": "BALANCED_UTILIZATION", "applicability": "APPLIED", "pointsAwarded": 15.0, "maxPoints": 15.0, "explanation": "All candidate labs are equally scheduled (0 min); full credit." }
   ]
 }
 ```
 
-Rejected candidates carry the hard-constraint failure reason instead (see [06-CONSTRAINTS.md](06-CONSTRAINTS.md) and [10-API-DOCUMENTATION.md](10-API-DOCUMENTATION.md#error-model)) — they are never scored, so they never appear with a partial score.
+`ADDITIONAL_ENVIRONMENT_FIT`/`FACULTY_PREFERENCE`/`TIMETABLE_GAP` never appear in `contributions` at all - there is no `NOT_APPLICABLE` placeholder entry for a factor with no registered scorer bean; only `PREFERRED_LAB_TYPE` can be `NOT_APPLICABLE`, and only when a specific subject records no preference.
+
+Rejected (invalid) candidates are never wrapped in a `ScoredCandidate` at all - they carry only their hard-constraint failure reason from `CandidateGenerationResult.invalidCandidates()` (see [06-CONSTRAINTS.md](06-CONSTRAINTS.md)); `ScoringEngine` never touches them.
 
 ## Hard/Soft Separation Checklist (self-audit for this document)
 
 - [x] No hard constraint (HC-01..HC-12) has a corresponding score penalty anywhere in this table.
-- [x] "Software Match" was renamed/redefined specifically to avoid double-counting HC-08.
+- [x] "Software Match" was renamed/redefined specifically to avoid double-counting HC-08 — and remains deferred (Additional Environment Fit) since no real data exists to back it.
 - [x] "Preferred Lab Type" was scoped to a distinct *soft* preference field so it doesn't duplicate HC-10.
-- [x] Every factor here is documented as contributing 0 (not a penalty, not a rejection) when its underlying preference data doesn't exist for a given subject/faculty.
+- [x] Every implemented factor is documented as contributing 0 (not a penalty, not a rejection) when its underlying preference data doesn't exist for a given subject/faculty — and excluded from the applicable maximum entirely via `NOT_APPLICABLE`, not a fabricated score.
+- [x] `ScoringEngine.score(...)` reads `CandidateGenerationResult.validCandidates()` only — verified live in Docker with an adversarial invalid-but-soft-favorable candidate that never appears in the ranking (Phase 11 completion report, "Hard-vs-Soft Scenario").

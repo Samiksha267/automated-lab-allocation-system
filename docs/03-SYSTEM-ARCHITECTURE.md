@@ -676,3 +676,48 @@ A temporary, `@Profile("dev")`-only `ApplicationRunner` (`DevCandidateGeneration
 ### Deviations from the Phase 1 plan
 
 One real correction, not to Phase 10 itself but to an assumption baked into the Phase 1 sketch of the validation pipeline (docs/05-SCHEDULING-ENGINE.md): the original "Generate Candidate Labs" pipeline step described prefiltering by capacity/software/type before constraint validation. Phase 10 deliberately implements the opposite - generate from every lab, let `ConstraintEngine` be the sole authority on validity - specifically to avoid a second, parallel filtering path that could silently disagree with Phase 9, and to keep every rejection explainable (a prefiltered-out lab never becomes a candidate, so it would have no attached `ConstraintViolation` for Phase 12/13 to read later). See ADR in docs/15-DESIGN-DECISIONS.md.
+
+### Pre-Phase 11 correction: the "16-lab" figure in Phase 10's original report
+
+Phase 10's completion report observed a 16-lab system. Phase 11's mandatory pre-phase investigation (its brief's PART 2) traced this to a manually-created `E-101` lab row, persisted in the Docker named volume from an earlier manual-verification session and never cleaned up (Docker volumes survive `docker compose down`/`up` cycles unless `-v` is passed) - not a defect in `DevLabSeeder`, which was already fully idempotent and seeds exactly the documented 15 labs. The stray row was deleted (`DELETE FROM lab WHERE code='E-101'`, verified zero dependent `allocation`/`lab_software`/`lab_equipment`/`lab_unavailability` rows first) and the dev-seeded lab count is now confirmed 15 both via direct SQL and via `GET /api/labs`.
+
+## 19. Phase 11 — Scoring Engine (implemented)
+
+### Pipeline
+
+```mermaid
+flowchart TD
+    Gen[CandidateGenerationResult] -->|validCandidates only| SE[ScoringEngine]
+    SE --> LU[LabUtilizationService - one grouped query for the whole candidate set]
+    LU --> SC[ScoringContext: schedulingContext + loadByLab + minLoad/maxLoad]
+    SC --> Scorers["AllocationScorer beans (CapacityFitScorer, PreferredLabTypeScorer, BalancedUtilizationScorer)"]
+    Scorers --> Contrib[ScoreContribution per factor per candidate]
+    Contrib --> Scored[ScoredCandidate: totalScore / maxPossibleScore]
+    Scored -->|normalized score desc, lab.code asc tie-break| Result[ScoringResult: rankedCandidates]
+```
+
+`ScoringEngine` sits directly after Phase 10's `CandidateGenerator` and reads only `CandidateGenerationResult.validCandidates()` - an invalid candidate is structurally unreachable by any scorer. See docs/05-SCHEDULING-ENGINE.md and docs/07-ALLOCATION-SCORING.md for the full architecture, readiness analysis, and formulas.
+
+### New backend additions (Phase 11)
+
+```
+com.college.laballocation.scheduling.scoring/   ScoringEngine (@Service)
+                                                  AllocationScorer (interface)
+                                                  CapacityFitScorer / PreferredLabTypeScorer / BalancedUtilizationScorer (@Component)
+                                                  ScoringConfiguration (@Component, app.scoring.* weights)
+                                                  ScoringContext / ScoreContribution / ScoredCandidate / ScoringResult
+                                                  ScoreApplicability / ScoringFactorId
+com.college.laballocation.scheduling/           LabUtilizationService (@Service) - new
+                                                  SchedulingRefs.SubjectRef gained preferredLabTypeId (Phase 11)
+                                                  AllocationRepository gained sumScheduledMinutesByLab (Phase 11)
+```
+
+No new migration - Phase 11 is entirely code against the existing Phase 8/9/10 schema and services, confirmed live: Flyway remained at schema version 10 after this phase's work.
+
+### No production scoring/ranking API (still)
+
+`ScoringEngine` remains internal, same as `CandidateGenerator` - no `POST /api/allocations/search` or equivalent was added. Phase 15 is still where a real end-user-facing endpoint belongs.
+
+### Verified end-to-end (Dockerized, 2026-08-23)
+
+A temporary `@Profile("dev")`-only `ApplicationRunner` (`DevScoringVerificationRunner`, deleted after use, same safe pattern as Phase 9/10's) exercised the real `ScoringEngine` against the real dev-seeded BDA/CNS demo data over live Docker/Postgres. All required scenarios matched: the BDA ranking scenario (batch A1, required capacity 23) produced C-202 (Data-Engineering-typed, Cloudera-capable) ranked first over B-201/B-301 (Computer-typed, also Cloudera-capable) - preferred-lab-type credit outweighing a looser capacity fit, a real soft-factor interaction, not hardcoded; C-304 (no Cloudera, but otherwise a strong soft-score candidate - Data-Engineering type, decent capacity) was confirmed invalid and never appeared in the ranking, proving hard constraints override soft scoring; temporarily inflating batch A1's strength drove every candidate invalid and produced an empty ranking with zero valid count, not an exception; the same request scored twice produced an identical ranking (determinism); CNS (a subject with zero preferences at all) against B-202/D-202 (identical capacity 60, identical Computer type) produced an exact score tie, broken deterministically by lab code ascending (B-202 before D-202); and temporarily loading D-202 with five extra sessions on other dates dropped its Balanced Utilization score below B-202's (idle), confirmed reverted afterward via `psql` (zero leftover allocations, batch A1 strength restored to 23). Regression re-verified: all Phase 3-10 endpoints still 200; `/api/allocations` still 404 both directions; Flyway still at schema version 10; dev-seeded lab count confirmed 15.

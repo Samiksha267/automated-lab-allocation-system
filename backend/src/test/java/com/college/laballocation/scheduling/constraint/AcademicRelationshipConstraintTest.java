@@ -62,7 +62,7 @@ class AcademicRelationshipConstraintTest {
         var request = batchRequest(LocalTime.of(9, 0), LocalTime.of(11, 0));
         return new SchedulingContext(
                 request,
-                new SubjectRef(SUBJECT_ID, "BDA", "Big Data Analytics", subjectAcademicYearId, null),
+                new SubjectRef(SUBJECT_ID, "BDA", "Big Data Analytics", subjectAcademicYearId, null, null),
                 new FacultyRef(FACULTY_ID, "FAC-BDA", "Faculty BDA", true),
                 new DivisionRef(DIVISION_ID, "A", 68, divisionAcademicYearId),
                 new BatchRef(BATCH_ID, "A1", 23, batchDivisionId),

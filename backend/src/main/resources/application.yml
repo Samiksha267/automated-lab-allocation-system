@@ -48,6 +48,14 @@ app:
     time-zone: ${COLLEGE_TIME_ZONE:Asia/Kolkata}
   cors:
     allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:5173}
+  scoring:
+    # Centralized soft-scoring weights (docs/07-ALLOCATION-SCORING.md) - only
+    # the three factors Phase 11 found implementable have a weight; Additional
+    # Environment Fit, Faculty Preference and Fewer Timetable Gaps are
+    # deferred (no underlying data yet) and deliberately have none.
+    capacity-fit-weight: ${SCORING_CAPACITY_FIT_WEIGHT:30}
+    preferred-lab-type-weight: ${SCORING_PREFERRED_LAB_TYPE_WEIGHT:15}
+    balanced-utilization-weight: ${SCORING_BALANCED_UTILIZATION_WEIGHT:15}
   jwt:
     # JWT_SECRET must be overridden with a real, randomly-generated secret
     # (see docs/12-DEPLOYMENT-GUIDE.md) outside of local/dev use - the fallback

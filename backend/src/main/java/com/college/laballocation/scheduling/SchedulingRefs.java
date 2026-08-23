@@ -21,8 +21,15 @@ import java.util.Set;
 public final class SchedulingRefs {
     private SchedulingRefs() {}
 
-    /** {@code academicYearId} backs HC-12's "subject belongs to the request's academic hierarchy" check; {@code requiredLabTypeId} backs HC-10. */
-    public record SubjectRef(Long id, String code, String name, Long academicYearId, Long requiredLabTypeId) {}
+    /**
+     * {@code academicYearId} backs HC-12's "subject belongs to the request's
+     * academic hierarchy" check; {@code requiredLabTypeId} backs HC-10.
+     * {@code preferredLabTypeId} (Phase 11) is the soft counterpart read only
+     * by {@code PreferredLabTypeScorer} - {@code Subject} already enforces
+     * the two are mutually exclusive, so a candidate never sees both set.
+     */
+    public record SubjectRef(
+            Long id, String code, String name, Long academicYearId, Long requiredLabTypeId, Long preferredLabTypeId) {}
 
     public record FacultyRef(Long id, String employeeCode, String name, boolean active) {}
 

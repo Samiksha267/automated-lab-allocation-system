@@ -1,6 +1,6 @@
 # Scheduling Engine
 
-**Status (Phase 10):** Candidate Generation now exists and is real, tested code — `CandidateGenerator` (`com.college.laballocation.scheduling.generation`) takes one `SchedulingRequest`, builds its `SchedulingContext` once, and produces an `EvaluatedCandidate` (candidate + `ConstraintEvaluation`) for every lab in the system via the unmodified Phase 9 `ConstraintEngine`. **No scoring, ranking, alternative-time search, or backtracking exists yet** — Phase 10 answers "which labs should be considered, and is each one valid?"; Phase 11 will decide which valid candidate is *preferable* (docs/03-SYSTEM-ARCHITECTURE.md §18). `AllocationDecision`, `ScoreBreakdown`, `AlternativeAllocation`, and `SchedulingMetrics` remain design-only, deliberately deferred to the phases that actually need them (Phase 11-13) rather than built now as empty scaffolding.
+**Status (Phase 11):** Candidate Generation (Phase 10) and a real Scoring Engine now both exist as tested code. `CandidateGenerator` (`com.college.laballocation.scheduling.generation`) takes one `SchedulingRequest`, builds its `SchedulingContext` once, and produces an `EvaluatedCandidate` (candidate + `ConstraintEvaluation`) for every lab in the system via the unmodified Phase 9 `ConstraintEngine`. `ScoringEngine` (`com.college.laballocation.scheduling.scoring`, Phase 11) then ranks only the *valid* candidates from that result using three real, data-backed soft-scoring factors — Capacity Fit, Preferred Lab Type, and Balanced Utilization. **No alternative-time search or backtracking exists yet, and no candidate is ever automatically selected or persisted** — Phase 11 answers "among the valid candidates, which are preferable?"; a future orchestration layer (Phase 12+) decides what to do with the ranking. `AllocationDecision`, `AlternativeAllocation`, and `SchedulingMetrics` remain design-only, deliberately deferred to the phases that actually need them (Phase 12/13) rather than built now as empty scaffolding.
 
 ## Candidate Generation (Phase 10)
 
@@ -24,7 +24,7 @@ EvaluatedCandidate{candidate, constraintEvaluation}
 CandidateGenerationResult{request, evaluatedCandidates}
 ```
 
-**All labs considered, no first-fit:** every lab in the system becomes exactly one candidate, evaluated through the real `ConstraintEngine` - there is no early return the moment a valid lab is found (PART 19 of the Phase 10 brief; this is precisely the naive "return the first available lab" behavior this project's whole premise argues against). Verified live in Docker: a 16-lab system produces exactly 16 evaluated candidates for a single request, regardless of how many are valid.
+**All labs considered, no first-fit:** every lab in the system becomes exactly one candidate, evaluated through the real `ConstraintEngine` - there is no early return the moment a valid lab is found (PART 19 of the Phase 10 brief; this is precisely the naive "return the first available lab" behavior this project's whole premise argues against). Verified live in Docker: the 15-lab dev seed produces exactly 15 evaluated candidates for a single request, regardless of how many are valid. (Phase 10's original completion report observed 16 labs; Phase 11's pre-phase investigation traced the 16th to a manually-created `E-101` row left over in the persistent Docker volume from an earlier manual-verification session - not a `DevLabSeeder` defect. `DevLabSeeder` itself was already fully idempotent and seeds exactly 15; the stray row was deleted, see docs/15-DESIGN-DECISIONS.md.)
 
 **Both valid and invalid candidates are preserved:** `CandidateGenerationResult` retains every `EvaluatedCandidate`, not just the valid ones - `validCandidates()`/`invalidCandidates()` are filtered views over the same underlying list, computed on demand, never a second generation pass. Rejected candidates keep their full `ConstraintViolation` list attached, which Phase 12 (explainability) and Phase 13 (alternatives) will read directly rather than re-running the engine.
 
@@ -39,6 +39,42 @@ CandidateGenerationResult{request, evaluatedCandidates}
 **Query strategy, honestly documented:** for N labs, generation issues one `SchedulingContextFactory` read (≈7 queries, once) plus, per lab, `CandidateAllocationFactory`'s existing Phase 9 loading (lab entity, installed software, installed equipment, existing lab allocations, unavailability windows - 5 queries). At the current ~15-16 lab scale this is roughly 75-85 total queries for one full generation run - a real, bounded N+1 shape, not eliminated in this phase. `CandidateAllocationFactory` (Phase 9) was deliberately not rewritten into a bulk loader here: Phase 9's behavior and tests were left untouched (PART 4/75 of the Phase 10 brief - do not rebuild Phase 9 without evidence of a real problem), and 75-85 queries for one interactive candidate-search request is not a demonstrated bottleneck at this project's scale. If a future phase's usage pattern makes this a real cost, the documented optimization path is a bulk variant (e.g. `LabSoftwareRepository.findByLabIdIn(labIds)` grouped by lab) rather than N separate per-lab queries - not built now because no evidence currently justifies it (Phase 25 benchmarks formally).
 
 **Read-only, advisory, and stateless between calls:** the whole `generate(...)` call runs inside one `@Transactional(readOnly = true)` boundary (the default propagation joins `SchedulingContextFactory`/`CandidateAllocationFactory`/`ConstraintEngine`'s own read-only transactions into the same one) - no write occurs, no lab is reserved, no result is cached. A candidate valid *at generation time* is not a booking; another request could occupy the same lab before any future booking commit actually happens. Phase 16 is responsible for revalidating and committing safely under concurrency - Phase 10 deliberately does not attempt to solve that here.
+
+## Scoring Engine (Phase 11)
+
+```
+CandidateGenerationResult
+        ↓
+validCandidates()                                  (invalid candidates are never scored)
+        ↓
+LabUtilizationService.scheduledMinutesByLab(...)   (once per scoring run, not once per candidate)
+        ↓
+ScoringContext{schedulingContext, loadByLab, minLoad, maxLoad}
+        ↓
+for every valid candidate: run every registered AllocationScorer
+        ↓
+ScoreContribution[] (per candidate, per factor)
+        ↓
+ScoredCandidate{evaluatedCandidate, contributions, totalScore, maxPossibleScore}
+        ↓
+sort by normalizedScore descending, then lab.code ascending (tie-break)
+        ↓
+ScoringResult{request, rankedCandidates, validCandidateCount, enabledFactors}
+```
+
+**Readiness analysis came before any scoring code (docs/07-ALLOCATION-SCORING.md's readiness matrix):** of the six originally-proposed factors, three had real, non-fabricated data behind them - Capacity Fit (already-validated `lab.capacity` vs. target strength), Preferred Lab Type (`subject.preferredLabTypeId`, distinct from HC-10's `requiredLabTypeId`), and Balanced Utilization (real `Allocation` rows, scoped to a schedule version). The other three were deferred, not faked: Additional Environment Fit has no "preferred/recommended software" concept anywhere in the schema (only all-required software/equipment joins); Faculty Preference has only `FacultyAvailability` (allowed windows), never a persisted lab/time *preference*; Fewer Timetable Gaps is structurally meaningless at this phase's architecture, since every candidate for one `CandidateGenerationResult` shares the exact same `date`/`startTime`/`endTime` - only the lab varies, so no lab choice can change a timetable gap. No `FacultyPreference` table, "preferred software" column, or working-hours concept was invented to manufacture these factors (PART 66 of the Phase 11 brief).
+
+**Hard constraints always override soft scoring:** `ScoringEngine.score(CandidateGenerationResult)` reads `generationResult.validCandidates()` only - an invalid candidate is structurally unreachable by any scorer, regardless of how favorable its soft factors would be. Verified live in Docker with a deliberately adversarial candidate (undersized capacity, but matching the subject's preferred lab type) - it never appears in the ranking.
+
+**Applicable maximum, not a fixed denominator:** a candidate's `maxPossibleScore` sums only the `maxPoints` of factors that actually applied to it (`ScoreApplicability.APPLIED`) - a subject with no preferred lab type gets a `PREFERRED_LAB_TYPE` contribution of `ScoreApplicability.NOT_APPLICABLE` (0 of 0), excluded entirely from both numerator and denominator, never a fabricated `0/15` penalty or a dishonest `15/15` freebie. Scores are reported as `raw/applicableMax` (e.g. `39.58/60.0`) with a separately-computed `normalizedScore()` percentage for ranking - never assumed to be "out of 100."
+
+**Capacity Fit formula:** `fitRatio = required / labCapacity; score = weight * fitRatio` - since every valid candidate already satisfies `labCapacity >= required` (HC-07), `fitRatio` is always in `(0, 1]`, rewarding the closest fit rather than the largest lab, with no division-by-zero risk.
+
+**Preferred Lab Type:** `NOT_APPLICABLE` (weight excluded entirely) when the subject records no preference; otherwise full weight on a lab-type match, zero (but still `APPLIED`, still counted toward the applicable max) on a mismatch - the candidate remains valid either way, only its score changes.
+
+**Balanced Utilization:** `LabUtilizationService` sums each candidate lab's scheduled minutes (`REGULAR` and `EXTRA` alike) within the requesting term's currently `PUBLISHED` `ScheduleVersion` only - never an absolute percentage, since no working-days/daily-operating-hours concept exists anywhere in this project to divide by. Min-max normalized across the candidate set: `score = weight * (maxLoad - candidateLoad) / (maxLoad - minLoad)`, or full weight for every candidate when every load is equal (including all-zero) - `NOT_APPLICABLE` only when the term has no `PUBLISHED` version at all, since there is then no basis for comparison whatsoever. One grouped SQL aggregation query loads every candidate lab's load in a single call, not one query per lab.
+
+**Read-only, stateless, no selection:** `ScoringEngine` runs inside `@Transactional(readOnly = true)`, never writes, never caches between calls, and never selects/persists a "winner" - `rankedCandidates()` is already ordered best-first, but nothing beyond that list exists yet. That decision layer is Phase 12 (Explainable Allocation).
 
 ## The Constraint Engine (Phase 9)
 
@@ -111,8 +147,8 @@ This is a **Constraint Satisfaction Problem (CSP)** for single-session validatio
 | `HardConstraintId` | **Implemented (Phase 8)** | Stable enum (`HC_01_LAB_CONFLICT` .. `HC_12_ACADEMIC_RELATIONSHIP`) identifying *which* constraint produced a `ConstraintResult` — kept separate from the wire-level API error codes in `ConstraintViolation`. |
 | `ConstraintEngine` / `ConstraintEvaluation` / `SchedulingConstraint` | **Implemented (Phase 9)** | The engine itself, its aggregate result type, and the interface every HC-01..HC-12 class implements. See "The Constraint Engine" section above. |
 | `CandidateGenerator` / `EvaluatedCandidate` / `CandidateGenerationResult` | **Implemented (Phase 10)** | `CandidateGenerator.generate(request)` (a `@Service`, not a pure record - it orchestrates real repository/factory/engine calls) returns a `CandidateGenerationResult`, which holds every `EvaluatedCandidate{candidate, constraintEvaluation}` for the request, valid and invalid alike. See "Candidate Generation" section above. |
-| `ScoreBreakdown` | Not yet implemented | Per-factor scores + total, from the scoring engine — Phase 11. |
-| `AllocationDecision` | Not yet implemented, deliberately deferred | Final outcome: selected candidate + full explanation, or failure + alternatives. Its real shape depends on scoring (Phase 11) and alternatives (Phase 13), neither of which exist yet; building it now would be speculative scaffolding rather than a tested contract. Phase 12 (Explainable Allocation) is where it belongs. |
+| `ScoringEngine` / `AllocationScorer` / `ScoreContribution` / `ScoredCandidate` / `ScoringResult` | **Implemented (Phase 11)** | `ScoringEngine.score(generationResult)` (a `@Service`) ranks only the valid candidates using Spring-discovered `AllocationScorer` beans (`CapacityFitScorer`, `PreferredLabTypeScorer`, `BalancedUtilizationScorer`); each returns a `ScoreContribution` (points/max/explanation/details) per candidate, summed into a `ScoredCandidate`, ranked into a `ScoringResult`. See "Scoring Engine" section above. |
+| `AllocationDecision` | Not yet implemented, deliberately deferred | Final outcome: selected candidate + full explanation, or failure + alternatives. Its real shape depends on alternatives (Phase 13), which doesn't exist yet; building it now would be speculative scaffolding rather than a tested contract. Phase 12 (Explainable Allocation) is where it belongs. |
 | `AlternativeAllocation` | Not yet implemented | A ranked fallback suggestion when the originally requested slot fails — Phase 13. |
 | `SchedulingMetrics` | Not yet implemented | Counters: candidates evaluated, constraints checked, backtrack count, execution time — for [16-PERFORMANCE-BENCHMARKS.md](16-PERFORMANCE-BENCHMARKS.md), Phase 14/25. |
 
@@ -133,11 +169,11 @@ Validate Hard Constraints (HC-01..HC-12) against each candidate    [ConstraintEn
       ↓
 CandidateGenerationResult retains BOTH valid and invalid candidates    [implemented, Phase 10]
       ↓
-Score Remaining (Valid) Candidates (07-ALLOCATION-SCORING.md)    [Phase 11]
+Score Remaining (Valid) Candidates Only (07-ALLOCATION-SCORING.md)    [ScoringEngine - implemented, Phase 11]
       ↓
-Rank Candidates
+Rank Candidates (normalized score descending, lab.code ascending tie-break)    [implemented, Phase 11]
       ↓
-Return AllocationDecision: ranked valid candidates + explained rejections
+Return AllocationDecision: ranked valid candidates + explained rejections    [Phase 12]
 ```
 
 **Correction to the original Phase 1 sketch:** the line above originally read "Generate Candidate Labs (active + capacity ≥ required + required software/equipment/type present)" - i.e. prefiltering by the same conditions the hard constraints check. Phase 10 deliberately did **not** implement it that way (PART 9/10/24 of the Phase 10 brief): prefiltering by capacity/software/type would duplicate HC-07/08/10's own logic in a second place, risking Phase 9 and Phase 10 silently disagreeing, and would make a rejected lab's reason unrecoverable (a prefiltered-out lab never becomes a candidate at all, so there is no `ConstraintViolation` to show a CR later explaining "why isn't C-304 in the list"). `CandidateGenerator` generates from every lab and lets the real `ConstraintEngine` be the sole source of truth for validity - see "Candidate Generation" above and ADR in docs/15-DESIGN-DECISIONS.md. "Remove Invalid Candidates" (the original sketch's next step) is also not a separate step in the real implementation - `CandidateGenerationResult` keeps both `validCandidates()` and `invalidCandidates()` as filtered views, never physically discarding the rejected ones, since Phase 12/13 need them.

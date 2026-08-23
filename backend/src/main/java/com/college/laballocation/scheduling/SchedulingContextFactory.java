@@ -62,10 +62,17 @@ public class SchedulingContextFactory {
                 allocationQueryService.findActiveForDivision(division.getId(), request.allocationDate()));
 
         Long requiredLabTypeId = subject.getRequiredLabType() != null ? subject.getRequiredLabType().getId() : null;
+        Long preferredLabTypeId = subject.getPreferredLabType() != null ? subject.getPreferredLabType().getId() : null;
 
         return new SchedulingContext(
                 request,
-                new SubjectRef(subject.getId(), subject.getCode(), subject.getName(), subject.getAcademicYear().getId(), requiredLabTypeId),
+                new SubjectRef(
+                        subject.getId(),
+                        subject.getCode(),
+                        subject.getName(),
+                        subject.getAcademicYear().getId(),
+                        requiredLabTypeId,
+                        preferredLabTypeId),
                 new FacultyRef(faculty.getId(), faculty.getEmployeeCode(), faculty.getName(), faculty.isActive()),
                 new DivisionRef(division.getId(), division.getCode(), division.getStrength(), division.getAcademicYear().getId()),
                 batch == null
