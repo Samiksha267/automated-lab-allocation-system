@@ -7,6 +7,7 @@ import com.college.laballocation.scheduling.CandidateAllocationFactory;
 import com.college.laballocation.scheduling.SchedulingContext;
 import com.college.laballocation.scheduling.SchedulingContextFactory;
 import com.college.laballocation.scheduling.SchedulingRequest;
+import com.college.laballocation.scheduling.automatic.SchedulingSearchState;
 import com.college.laballocation.scheduling.constraint.ConstraintEngine;
 import com.college.laballocation.scheduling.constraint.ConstraintEvaluation;
 import java.util.ArrayList;
@@ -70,17 +71,34 @@ public class CandidateGenerator {
     }
 
     public CandidateGenerationResult generate(SchedulingRequest request) {
+        return generate(request, SchedulingSearchState.empty());
+    }
+
+    /**
+     * Identical to {@link #generate(SchedulingRequest)} except that the
+     * built {@link SchedulingContext} and every candidate's {@code LabRef}
+     * also see {@code searchState}'s provisional decisions (Phase 14, PART
+     * 4/5) - threaded through unchanged to {@link SchedulingContextFactory}/
+     * {@link CandidateAllocationFactory}, which are themselves the only two
+     * places extended to merge provisional occupancy onto the same lists
+     * HC-01/02/04/05 already read. This method still calls the real,
+     * unmodified {@link ConstraintEngine} exactly once per lab - no
+     * constraint logic is duplicated for automatic scheduling. Every
+     * existing caller uses {@link #generate(SchedulingRequest)} (an empty
+     * search state) and is completely unaffected by this addition.
+     */
+    public CandidateGenerationResult generate(SchedulingRequest request, SchedulingSearchState searchState) {
         long startNanos = System.nanoTime();
 
         // Built exactly once per request - reused for every candidate below,
         // never rebuilt per lab (PART 5/15/45 of the Phase 10 brief).
-        SchedulingContext context = schedulingContextFactory.build(request);
+        SchedulingContext context = schedulingContextFactory.build(request, searchState);
 
         List<Lab> labs = labRepository.findAll(Sort.by(Sort.Direction.ASC, "code"));
 
         List<EvaluatedCandidate> evaluated = new ArrayList<>(labs.size());
         for (Lab lab : labs) {
-            CandidateAllocation candidate = candidateAllocationFactory.build(context, lab.getId());
+            CandidateAllocation candidate = candidateAllocationFactory.build(context, lab.getId(), searchState);
             ConstraintEvaluation evaluation = constraintEngine.evaluate(context, candidate);
             evaluated.add(new EvaluatedCandidate(candidate, evaluation));
         }

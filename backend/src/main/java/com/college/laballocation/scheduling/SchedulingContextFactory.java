@@ -11,8 +11,10 @@ import com.college.laballocation.scheduling.SchedulingRefs.DivisionRef;
 import com.college.laballocation.scheduling.SchedulingRefs.ExistingAllocationSnapshot;
 import com.college.laballocation.scheduling.SchedulingRefs.FacultyRef;
 import com.college.laballocation.scheduling.SchedulingRefs.SubjectRef;
+import com.college.laballocation.scheduling.automatic.SchedulingSearchState;
 import com.college.laballocation.subject.Subject;
 import com.college.laballocation.subject.SubjectService;
+import java.util.ArrayList;
 import java.util.List;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -48,18 +50,36 @@ public class SchedulingContextFactory {
     }
 
     public SchedulingContext build(SchedulingRequest request) {
+        return build(request, SchedulingSearchState.empty());
+    }
+
+    /**
+     * Identical to {@link #build(SchedulingRequest)} except that each
+     * candidate-independent occupancy list also includes {@code searchState}'s
+     * provisional decisions for the matching faculty/batch/division on this
+     * date (Phase 14, PART 4/5) - appended onto the exact same lists
+     * HC-02/04/05 already read, so those constraints require no change at
+     * all to see both persisted and provisional occupancy. Every existing
+     * caller uses {@link #build(SchedulingRequest)} (an empty search state)
+     * and is completely unaffected by this addition.
+     */
+    public SchedulingContext build(SchedulingRequest request, SchedulingSearchState searchState) {
         Subject subject = subjectService.getEntity(request.subjectId());
         Faculty faculty = facultyService.getEntity(request.facultyId());
         Division division = divisionService.getEntity(request.divisionId());
         Batch batch = request.batchId() != null ? batchService.getEntity(request.batchId()) : null;
 
-        List<ExistingAllocationSnapshot> facultyAllocations = snapshot(
-                allocationQueryService.findActiveForFaculty(faculty.getId(), request.allocationDate()));
+        List<ExistingAllocationSnapshot> facultyAllocations = merge(
+                snapshot(allocationQueryService.findActiveForFaculty(faculty.getId(), request.allocationDate())),
+                searchState.forFaculty(faculty.getId(), request.allocationDate()));
         List<ExistingAllocationSnapshot> batchAllocations = batch == null
                 ? List.of()
-                : snapshot(allocationQueryService.findActiveForBatch(batch.getId(), request.allocationDate()));
-        List<ExistingAllocationSnapshot> divisionAllocations = snapshot(
-                allocationQueryService.findActiveForDivision(division.getId(), request.allocationDate()));
+                : merge(
+                        snapshot(allocationQueryService.findActiveForBatch(batch.getId(), request.allocationDate())),
+                        searchState.forBatch(batch.getId(), request.allocationDate()));
+        List<ExistingAllocationSnapshot> divisionAllocations = merge(
+                snapshot(allocationQueryService.findActiveForDivision(division.getId(), request.allocationDate())),
+                searchState.forDivision(division.getId(), request.allocationDate()));
 
         Long requiredLabTypeId = subject.getRequiredLabType() != null ? subject.getRequiredLabType().getId() : null;
         Long preferredLabTypeId = subject.getPreferredLabType() != null ? subject.getPreferredLabType().getId() : null;
@@ -85,5 +105,15 @@ public class SchedulingContextFactory {
 
     private List<ExistingAllocationSnapshot> snapshot(List<Allocation> allocations) {
         return allocations.stream().map(ExistingAllocationSnapshot::from).toList();
+    }
+
+    private List<ExistingAllocationSnapshot> merge(List<ExistingAllocationSnapshot> persisted, List<ExistingAllocationSnapshot> provisional) {
+        if (provisional.isEmpty()) {
+            return persisted;
+        }
+        List<ExistingAllocationSnapshot> merged = new ArrayList<>(persisted.size() + provisional.size());
+        merged.addAll(persisted);
+        merged.addAll(provisional);
+        return List.copyOf(merged);
     }
 }

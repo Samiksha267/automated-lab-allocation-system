@@ -821,3 +821,115 @@ ADR-style log of significant, hard-to-reverse decisions. Each entry: Context, De
 **Reasons:** Keeping the policy in one component (rather than scattering magic time/day literals across `SchedulingSlotProvider`) means a future correction to real college policy - if these values ever prove wrong - requires changing configuration in exactly one place, with zero code changes to conflict analysis, scoring, or generation.
 
 **Trade-offs:** `max-lookahead-days` was not given an exact number by the user ("up to N, a small number like 2-3") - this project chose 3 as its own documented default within that stated bound, explicitly flagged as a project decision rather than a college policy fact (docs/ASSUMPTIONS.md A-35).
+
+---
+
+## ADR-060: `SessionRequirement` Is a Distinct Type From `SchedulingRequest`, Never a Placeholder-Dated Reuse
+
+**Context:** Phase 14 needed an input shape for "what must be scheduled" (a session that has no assigned date/time yet) alongside the existing Phase 8 `SchedulingRequest` ("evaluate this at this concrete date/time"). Reusing `SchedulingRequest` with a sentinel/placeholder date was a tempting shortcut to avoid a new type.
+
+**Decision:** `SessionRequirement` is a separate record (key, allocationType, targetType, divisionId, batchId, subjectId, facultyId, academicTermId, actor - no date/time fields at all) with a `toRequest(TimeSlot slot)` method that produces a concrete `SchedulingRequest` only once a candidate slot is being tried. `SchedulingRequest` itself gains no new fields and no new "not yet decided" semantics.
+
+**Alternatives:** Reusing `SchedulingRequest` with a placeholder date (e.g. `LocalDate.MIN`) - rejected outright per the brief's explicit instruction, since every one of Phase 8-13's invariants and every existing caller assumes a `SchedulingRequest`'s date/time is real and evaluable, and a placeholder value would either need special-casing everywhere or would silently produce nonsense if it ever leaked into a real evaluation path.
+
+**Reasons:** Keeping "what must happen" (`SessionRequirement`) and "evaluate this at this instant" (`SchedulingRequest`) as separate types makes each one's invariants simple and unconditional - a `SchedulingRequest` is always concretely evaluable, full stop, which is exactly what every Phase 8-13 consumer already assumes and is never asked to change.
+
+**Trade-offs:** One extra small type and one small conversion method - accepted, since the alternative would have quietly weakened `SchedulingRequest`'s own contract for every existing caller.
+
+---
+
+## ADR-061: Provisional Occupancy Integrated via Additive Overloads, Never a Second Validity Path
+
+**Context:** Phase 14's backtracking search needs HC-01/02/04/05 to see both persisted allocations and the search's own in-progress (not-yet-persisted) decisions, without duplicating any of Phase 9's tested constraint logic and without turning any constraint class into a database-writing service.
+
+**Decision:** New overloaded methods accepting a `SchedulingSearchState` were added alongside the existing single/two-arg signatures at each layer the data must pass through (`SchedulingContextFactory.build(request, searchState)`, `CandidateAllocationFactory.build(context, labId, searchState)`, `CandidateGenerator.generate(request, searchState)`, `ExplainableAllocationService.recommend(request, searchState)`). The original signatures are unchanged and simply delegate to the new ones with `SchedulingSearchState.empty()`. `SchedulingSearchState.toSnapshot()` produces plain `ExistingAllocationSnapshot` records - the exact type HC-01/02/04/05 already consumed before Phase 14 existed - merged onto the same lists the persisted data already populates.
+
+**Alternatives:** A parallel "provisional conflict checker" duplicating HC-01/02/04/05's overlap logic inside the backtracking engine itself - rejected, since it would create a second source of truth for validity that could silently drift from Phase 9's tested classes as they evolve. Modifying HC-01/02/04/05 in place to accept a new parameter - rejected as a larger, riskier change to twelve already-tested constraint classes when a strictly additive extension achieves the same result with zero behavior change for every existing caller.
+
+**Reasons:** This was only possible because Phase 9's constraints already read conflict data exclusively from plain `List<ExistingAllocationSnapshot>` records, never JPA-coupled - an investigation this phase's brief explicitly required before choosing an integration strategy. Confirmed by the full pre-existing test suite passing unmodified (aside from Mockito stub-arity updates, a test-infrastructure concern, not a behavior change) after the additive overloads were introduced.
+
+**Trade-offs:** Four classes now carry two overloads of the same method instead of one - a small, deliberate duplication of method signatures (not logic) in exchange for zero risk to twelve already-tested constraint classes.
+
+---
+
+## ADR-062: Bounded DFS Backtracking With a Hard Node-Count Limit, Not an Unbounded Search
+
+**Context:** Multi-requirement scheduling is a CSP with worst-case exponential complexity; an unbounded search could run indefinitely on a pathological or genuinely infeasible input.
+
+**Decision:** `AutomaticSchedulingEngine` performs depth-first search with backtracking, bounded by a configurable `maxNodes` (default 2000, `app.scheduling.backtracking.max-nodes`). Reaching the limit produces `SEARCH_LIMIT_REACHED`, a status explicitly distinct from `NO_SOLUTION` - "we stopped searching" is never conflated with "we proved this is impossible."
+
+**Alternatives:** A wall-clock timeout instead of a node count - rejected, since it would make search behavior non-deterministic across runs on different hardware/load, breaking the determinism requirement (ADR requirement carried over from every earlier phase's own testing philosophy). A node count is deterministic and directly reproducible in a unit test.
+
+**Reasons:** Bounding the search is mandatory for a production system - the brief itself required it, and exponential worst-case behavior on ~15 labs and a handful of requirements is a real, not hypothetical, risk once a caller supplies pathological or near-infeasible input (a large date range, many requirements, few real options).
+
+**Trade-offs:** A search that would have found a valid complete schedule two nodes past the limit reports `SEARCH_LIMIT_REACHED` instead - a known, accepted trade-off of any bounded search, with the limit itself exposed as configuration so it can be raised for a specific deployment without a code change.
+
+---
+
+## ADR-063: Dynamic MRV, Recomputed at Every Search Node — Supersedes the Phase 1 Static Sketch
+
+**Context:** The original Phase 1 planning sketch in docs/05-SCHEDULING-ENGINE.md described most-constrained-first ordering computed once, at the top of the search. Phase 14's actual implementation needed to decide whether that static ordering was still correct once backtracking is real.
+
+**Decision:** `AutomaticSchedulingEngine.solve(...)` recomputes each unassigned requirement's number of remaining valid choices at every recursion node (Minimum-Remaining-Values), not once at the top of the search - since which requirement is "most constrained" can genuinely change once earlier requirements have consumed some of the shared slot/lab space.
+
+**Alternatives:** The original static, top-level ordering - rejected once it was worked through by hand (roughly ten constructed CSP scenarios during this phase) and shown to be provably wrong in scenarios where an earlier assignment changes which requirement is now most constrained; a static ordering computed before any assignment exists cannot reflect that.
+
+**Reasons:** Dynamic MRV is also what empirically avoids backtracking on the brief's own worked "R1: X-or-Y, R2: X-only" example - it always schedules the more-constrained requirement (R2) first, sidestepping the exact greedy trap the brief uses to motivate backtracking in the first place. This was proven directly by a package-private, test-only `useMrv=false` toggle isolating the underlying backtracking/undo mechanism from MRV's benefit, so both properties (backtracking works; MRV usually avoids needing it) are demonstrated separately rather than conflated into one ambiguous test.
+
+**Trade-offs:** Recomputing MRV at every node costs more per node than a static ordering (`O(remaining requirements × slots)` per node instead of a one-time `O(requirements × slots)`) - accepted, since correctness (and materially fewer backtracks in practice) matters more than this constant-factor cost at the project's actual scale. Documented in docs/05-SCHEDULING-ENGINE.md as an explicit complexity trade-off, not glossed over.
+
+---
+
+## ADR-064: Immutable `SchedulingSearchState`, Never Save-Trial-Then-Rollback
+
+**Context:** The brief explicitly forbade a "provisionally persist to the database, then roll back the transaction" approach to representing in-progress search decisions - both for correctness (any observer, including a concurrent request, could see the trial state) and for the simple reason that Phase 14 must never write to the database during search at all.
+
+**Decision:** `SchedulingSearchState` is an immutable record holding a `List<PlannedAllocation>`; each recursive step produces a new state via `with(PlannedAllocation)` rather than mutating a shared collection, and backtracking is simply "don't carry this state forward," not an explicit undo/rollback operation.
+
+**Alternatives:** A mutable, shared list with explicit add/remove-on-backtrack calls - considered, since it would be marginally cheaper per node; rejected in favor of immutability once it was clear the search's actual node counts (bounded by `maxNodes`, in the thousands at most) make the performance difference immaterial, while immutability eliminates an entire class of "did every backtrack path correctly undo its own mutation" bugs by construction.
+
+**Reasons:** This directly satisfies the brief's "no save-trial-then-rollback" requirement in its strongest form - not just "don't hit the database," but "there is no mutable shared state to leak between recursive branches at all." It also makes `SearchBookkeeping.observe(state)` (used to track the best state seen anywhere during search, for `PARTIAL`/`NO_SOLUTION` reporting) trivially safe to call at any point without needing to defensively copy anything.
+
+**Trade-offs:** Each recursion node allocates a new `SchedulingSearchState`/list rather than mutating one shared instance - accepted per the brief's own explicit preference ("prefer immutable state; correctness over micro-optimization").
+
+---
+
+## ADR-065: `PlannedAllocation.toSnapshot()` Uses a Sentinel `-1L` Allocation Id, Never `null`
+
+**Context:** A provisional (not-yet-persisted) planned allocation has no real database identity yet. The first implementation modeled this as `allocationId = null` in the `ExistingAllocationSnapshot` it produces for constraint evaluation - a reasonable-seeming choice at design time, since there genuinely is no persisted id.
+
+**Decision:** `PlannedAllocation` defines `PROVISIONAL_ALLOCATION_ID = -1L` and uses it in `toSnapshot()` instead of `null`.
+
+**Reasons:** This was not a design preference - it fixes a real bug found live in Docker: `LabConflictConstraint`/`FacultyConflictConstraint`/`BatchConflictConstraint`/`DivisionWideConflictConstraint` all build their `ConstraintViolation.details()` map via `java.util.Map.of("existingAllocationId", existing.allocationId(), ...)`, and `Map.of` throws `NullPointerException` on any null value. This was never exercised by any mocked unit test (mocks bypass the real constraint classes entirely) and crashed the whole Spring Boot process the first time a real provisional conflict occurred during live multi-requirement search. `-1L` is documented as never colliding with a real PostgreSQL `BIGINT` identity value, which always starts at 1 and is positive (docs/ASSUMPTIONS.md A-14).
+
+**Alternatives:** Changing all four constraint classes to use `Map.ofEntries` with a null-tolerant entry, or to build the map conditionally - rejected as a larger, riskier change touching four already-tested Phase 9 classes, when the actual defect is fully addressable at its true source (a provisional snapshot claiming to have no id when a synthetic, always-valid one is all that's actually needed downstream).
+
+**Trade-offs:** None significant - a regression test (`PlannedAllocationTest`) exercises the real, unmocked `LabConflictConstraint` against a snapshot built via `toSnapshot()` to guard against this specific defect recurring.
+
+---
+
+## ADR-066: Four-Status Result Model — `SEARCH_LIMIT_REACHED` Is Never Conflated With `NO_SOLUTION`
+
+**Context:** A multi-requirement search can end in more than two meaningfully different ways: everything got scheduled; some things got scheduled and the rest are genuinely impossible; nothing is possible at all; or the search ran out of budget before it could determine either.
+
+**Decision:** `AutomaticScheduleStatus` has exactly four values - `COMPLETE`, `PARTIAL`, `NO_SOLUTION`, `SEARCH_LIMIT_REACHED` - each with a precise, non-overlapping meaning. `SearchBookkeeping` tracks the best state observed anywhere during search (`observe()`) so `PARTIAL`/`NO_SOLUTION` results can report real, best-effort assignments without a separate greedy fallback pass.
+
+**Alternatives:** Collapsing `NO_SOLUTION` and `SEARCH_LIMIT_REACHED` into one `PARTIAL`/`FAILED` status - rejected, since they mean fundamentally different things to a caller: one is a proof of infeasibility within the search budget, the other is an explicit admission the search didn't finish. Reporting the latter as the former would falsely claim impossibility a larger node budget might disprove.
+
+**Reasons:** This distinction is directly testable and directly tested - a dedicated unit test constructs a scenario where a tiny `maxNodes` cuts a solvable search short (`SEARCH_LIMIT_REACHED`) and a separate scenario exhausts a full, adequate budget on a genuinely infeasible input (`NO_SOLUTION`), proving the two paths are reachable and distinguishable in practice, not just in name.
+
+**Trade-offs:** None significant - four precise statuses cost nothing extra to compute, since `SearchBookkeeping` already tracks the information needed to distinguish them.
+
+---
+
+## ADR-067: Automatic Scheduling Remains Advisory — No Persistence, No Production API, No `ScheduleVersion`
+
+**Context:** Consistent with Phase 12/13 (ADR-053), Phase 14's result is itself a snapshot computed during one read-only transaction; the brief explicitly reconfirmed this boundary rather than letting Phase 14 quietly become the first phase to persist automatically.
+
+**Decision:** `AutomaticSchedulingEngine.schedule(...)` runs under `@Transactional(readOnly = true)`, never constructs an `Allocation` entity, never creates or touches a `ScheduleVersion`, and is not exposed through any REST controller - it exists only as an internal service, exercised by tests and by a temporary, deleted-after-use dev diagnostic runner.
+
+**Alternatives:** Adding a production `POST /api/scheduling/automatic` endpoint now that the engine exists - rejected as outside this phase's explicit scope (deciding *which* valid multi-session schedule to actually commit, and under what authorization/workflow, is a real design question the brief deferred, not an oversight to quietly resolve here) and because no documented FR currently calls for one.
+
+**Reasons:** Committing a generated schedule safely under concurrent real-world writes is exactly the kind of problem Phase 16's FCFS/concurrency work exists to solve properly (ADR-010) - persisting from Phase 14 now would mean either reinventing that safety net ad hoc or, worse, skipping it. Verified live: `automaticSchedulingNeverChangesAllocationRowCount` (`AutomaticSchedulingIT`) and the manual Docker verification's before/after row-count check both confirm zero persistence across every scenario run.
+
+**Trade-offs:** A caller cannot yet act on a generated schedule through this system - it must be reviewed and committed by some future, still-undesigned workflow. Documented as a known limitation in docs/05-SCHEDULING-ENGINE.md, not silently implied to be "done."

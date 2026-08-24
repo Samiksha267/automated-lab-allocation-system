@@ -10,6 +10,8 @@ import com.college.laballocation.lab.LabUnavailabilityRepository;
 import com.college.laballocation.lab.Software;
 import com.college.laballocation.scheduling.SchedulingRefs.ExistingAllocationSnapshot;
 import com.college.laballocation.scheduling.SchedulingRefs.LabRef;
+import com.college.laballocation.scheduling.automatic.SchedulingSearchState;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -54,6 +56,19 @@ public class CandidateAllocationFactory {
     }
 
     public CandidateAllocation build(SchedulingContext context, Long labId) {
+        return build(context, labId, SchedulingSearchState.empty());
+    }
+
+    /**
+     * Identical to {@link #build(SchedulingContext, Long)} except that
+     * {@code LabRef.existingAllocations()} also includes {@code searchState}'s
+     * provisional decisions for this lab on this date (Phase 14, PART 4/5) -
+     * appended onto the exact same list HC-01 already reads, so it requires
+     * no change at all to see both persisted and provisional lab occupancy.
+     * Every existing caller uses {@link #build(SchedulingContext, Long)} (an
+     * empty search state) and is completely unaffected by this addition.
+     */
+    public CandidateAllocation build(SchedulingContext context, Long labId, SchedulingSearchState searchState) {
         Lab lab = labService.getEntity(labId);
 
         Set<String> softwareCodes = labSoftwareRepository.findByLabId(labId).stream()
@@ -65,10 +80,20 @@ public class CandidateAllocationFactory {
                 .collect(Collectors.toUnmodifiableMap(
                         le -> le.getEquipment().getCode(), LabEquipment::getQuantity));
 
-        List<ExistingAllocationSnapshot> existingAllocations = allocationQueryService
+        List<ExistingAllocationSnapshot> persistedAllocations = allocationQueryService
                 .findActiveForLab(labId, context.request().allocationDate()).stream()
                 .map(ExistingAllocationSnapshot::from)
                 .toList();
+        List<ExistingAllocationSnapshot> provisionalAllocations = searchState.forLab(labId, context.request().allocationDate());
+        List<ExistingAllocationSnapshot> existingAllocations;
+        if (provisionalAllocations.isEmpty()) {
+            existingAllocations = persistedAllocations;
+        } else {
+            List<ExistingAllocationSnapshot> merged = new ArrayList<>(persistedAllocations.size() + provisionalAllocations.size());
+            merged.addAll(persistedAllocations);
+            merged.addAll(provisionalAllocations);
+            existingAllocations = List.copyOf(merged);
+        }
 
         List<InstantRange> unavailabilityWindows = labUnavailabilityRepository.findByLabIdOrderByStartDateTime(labId).stream()
                 .map(u -> new InstantRange(u.getStartDateTime(), u.getEndDateTime()))

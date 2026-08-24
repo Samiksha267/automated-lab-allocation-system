@@ -78,4 +78,35 @@ public class SchedulingSlotProvider {
         daySlots.sort(Comparator.comparingInt(CandidateSlot::minutesFromOriginalStart).thenComparing(CandidateSlot::startTime));
         return daySlots;
     }
+
+    /**
+     * Every working-day slot of the confirmed fixed duration
+     * ({@code duration}) inside {@code [startDate, endDate]} inclusive,
+     * ordered date ascending then time ascending - the full slot universe
+     * Phase 14's automatic scheduling searches over (PART 15 of the Phase
+     * 14 brief). Unlike {@link #generateCandidateSlots(SchedulingRequest)},
+     * this has no "original request" to be relative to and excludes no
+     * slot - every caller-visible slot in the range is included.
+     *
+     * <p>Reuses the exact same {@link SchedulingSlotPolicy} (working days,
+     * day start/end, step) as Phase 13 - no second slot-policy source
+     * exists (PART 12).
+     */
+    public List<TimeSlot> generateSlotsInRange(LocalDate startDate, LocalDate endDate, Duration duration) {
+        if (startDate.isAfter(endDate)) {
+            throw new IllegalArgumentException("startDate (" + startDate + ") must not be after endDate (" + endDate + ")");
+        }
+        List<TimeSlot> slots = new ArrayList<>();
+        for (LocalDate date = startDate; !date.isAfter(endDate); date = date.plusDays(1)) {
+            if (!policy.workingDays().contains(date.getDayOfWeek())) {
+                continue;
+            }
+            for (LocalTime start = policy.dayStartTime();
+                    !start.plus(duration).isAfter(policy.dayEndTime());
+                    start = start.plusMinutes(policy.slotStepMinutes())) {
+                slots.add(new TimeSlot(date, start, start.plus(duration)));
+            }
+        }
+        return slots;
+    }
 }

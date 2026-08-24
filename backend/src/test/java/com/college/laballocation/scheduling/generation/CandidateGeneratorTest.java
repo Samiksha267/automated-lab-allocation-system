@@ -113,25 +113,25 @@ class CandidateGeneratorTest {
     @Test
     void contextIsBuiltExactlyOnceRegardlessOfLabCount() {
         SchedulingContext context = context();
-        when(schedulingContextFactory.build(any())).thenReturn(context);
+        when(schedulingContextFactory.build(any(), any())).thenReturn(context);
         when(labRepository.findAll(any(Sort.class)))
                 .thenReturn(List.of(lab("A-101", 1L), lab("B-201", 2L), lab("C-301", 3L)));
-        when(candidateAllocationFactory.build(eq(context), any())).thenAnswer(
+        when(candidateAllocationFactory.build(eq(context), any(), any())).thenAnswer(
                 inv -> new CandidateAllocation(context, labRef(inv.getArgument(1), "X")));
         when(constraintEngine.evaluate(eq(context), any())).thenReturn(passingEvaluation());
 
         generator.generate(request());
 
-        verify(schedulingContextFactory, times(1)).build(any());
+        verify(schedulingContextFactory, times(1)).build(any(), any());
     }
 
     @Test
     void allLabsAreEvaluatedNoFirstFitShortCircuit() {
         SchedulingContext context = context();
-        when(schedulingContextFactory.build(any())).thenReturn(context);
+        when(schedulingContextFactory.build(any(), any())).thenReturn(context);
         when(labRepository.findAll(any(Sort.class)))
                 .thenReturn(List.of(lab("A-101", 1L), lab("B-201", 2L), lab("C-301", 3L)));
-        when(candidateAllocationFactory.build(eq(context), any())).thenAnswer(
+        when(candidateAllocationFactory.build(eq(context), any(), any())).thenAnswer(
                 inv -> new CandidateAllocation(context, labRef(inv.getArgument(1), "X")));
         when(constraintEngine.evaluate(eq(context), any())).thenReturn(passingEvaluation());
 
@@ -144,14 +144,14 @@ class CandidateGeneratorTest {
     @Test
     void validAndInvalidCandidatesAreSeparatedAndInvalidRetainViolations() {
         SchedulingContext context = context();
-        when(schedulingContextFactory.build(any())).thenReturn(context);
+        when(schedulingContextFactory.build(any(), any())).thenReturn(context);
         Lab labA = lab("A-101", 1L);
         Lab labB = lab("B-201", 2L);
         Lab labC = lab("C-301", 3L);
         when(labRepository.findAll(any(Sort.class))).thenReturn(List.of(labA, labB, labC));
-        when(candidateAllocationFactory.build(eq(context), eq(1L))).thenReturn(new CandidateAllocation(context, labRef(1L, "A-101")));
-        when(candidateAllocationFactory.build(eq(context), eq(2L))).thenReturn(new CandidateAllocation(context, labRef(2L, "B-201")));
-        when(candidateAllocationFactory.build(eq(context), eq(3L))).thenReturn(new CandidateAllocation(context, labRef(3L, "C-301")));
+        when(candidateAllocationFactory.build(eq(context), eq(1L), any())).thenReturn(new CandidateAllocation(context, labRef(1L, "A-101")));
+        when(candidateAllocationFactory.build(eq(context), eq(2L), any())).thenReturn(new CandidateAllocation(context, labRef(2L, "B-201")));
+        when(candidateAllocationFactory.build(eq(context), eq(3L), any())).thenReturn(new CandidateAllocation(context, labRef(3L, "C-301")));
         when(constraintEngine.evaluate(eq(context), any())).thenAnswer(inv -> {
             CandidateAllocation candidate = inv.getArgument(1);
             if (candidate.lab().code().equals("A-101")) {
@@ -171,9 +171,9 @@ class CandidateGeneratorTest {
     @Test
     void zeroValidCandidatesIsANormalResultNotAnException() {
         SchedulingContext context = context();
-        when(schedulingContextFactory.build(any())).thenReturn(context);
+        when(schedulingContextFactory.build(any(), any())).thenReturn(context);
         when(labRepository.findAll(any(Sort.class))).thenReturn(List.of(lab("A-101", 1L), lab("B-201", 2L), lab("C-301", 3L)));
-        when(candidateAllocationFactory.build(eq(context), any())).thenAnswer(
+        when(candidateAllocationFactory.build(eq(context), any(), any())).thenAnswer(
                 inv -> new CandidateAllocation(context, labRef(inv.getArgument(1), "X")));
         when(constraintEngine.evaluate(eq(context), any())).thenReturn(failingEvaluation("CAPACITY_VIOLATION"));
 
@@ -186,9 +186,9 @@ class CandidateGeneratorTest {
     @Test
     void allValidCandidatesStillProducesNoWinner() {
         SchedulingContext context = context();
-        when(schedulingContextFactory.build(any())).thenReturn(context);
+        when(schedulingContextFactory.build(any(), any())).thenReturn(context);
         when(labRepository.findAll(any(Sort.class))).thenReturn(List.of(lab("A-101", 1L), lab("B-201", 2L), lab("C-301", 3L)));
-        when(candidateAllocationFactory.build(eq(context), any())).thenAnswer(
+        when(candidateAllocationFactory.build(eq(context), any(), any())).thenAnswer(
                 inv -> new CandidateAllocation(context, labRef(inv.getArgument(1), "X")));
         when(constraintEngine.evaluate(eq(context), any())).thenReturn(passingEvaluation());
 
@@ -203,9 +203,9 @@ class CandidateGeneratorTest {
     @Test
     void deterministicOrderIsRequestedFromTheRepositoryByLabCodeAscending() {
         SchedulingContext context = context();
-        when(schedulingContextFactory.build(any())).thenReturn(context);
+        when(schedulingContextFactory.build(any(), any())).thenReturn(context);
         when(labRepository.findAll(any(Sort.class))).thenReturn(List.of(lab("A-101", 1L), lab("B-201", 2L)));
-        when(candidateAllocationFactory.build(eq(context), any())).thenAnswer(
+        when(candidateAllocationFactory.build(eq(context), any(), any())).thenAnswer(
                 inv -> new CandidateAllocation(context, labRef(inv.getArgument(1), "X")));
         when(constraintEngine.evaluate(eq(context), any())).thenReturn(passingEvaluation());
 
@@ -221,9 +221,9 @@ class CandidateGeneratorTest {
     @Test
     void multipleViolationsOnOneCandidateArePreserved() {
         SchedulingContext context = context();
-        when(schedulingContextFactory.build(any())).thenReturn(context);
+        when(schedulingContextFactory.build(any(), any())).thenReturn(context);
         when(labRepository.findAll(any(Sort.class))).thenReturn(List.of(lab("A-101", 1L)));
-        when(candidateAllocationFactory.build(eq(context), eq(1L))).thenReturn(new CandidateAllocation(context, labRef(1L, "A-101")));
+        when(candidateAllocationFactory.build(eq(context), eq(1L), any())).thenReturn(new CandidateAllocation(context, labRef(1L, "A-101")));
         ConstraintViolation capacityViolation = new ConstraintViolation("CAPACITY_VIOLATION", "x", "LAB", null, Map.of());
         ConstraintViolation softwareViolation = new ConstraintViolation("SOFTWARE_MISMATCH", "y", "LAB", null, Map.of());
         ConstraintEvaluation twoFailures = ConstraintEvaluation.of(List.of(
@@ -240,9 +240,9 @@ class CandidateGeneratorTest {
     @Test
     void noDuplicateLabsAppearInOneGenerationRun() {
         SchedulingContext context = context();
-        when(schedulingContextFactory.build(any())).thenReturn(context);
+        when(schedulingContextFactory.build(any(), any())).thenReturn(context);
         when(labRepository.findAll(any(Sort.class))).thenReturn(List.of(lab("A-101", 1L), lab("B-201", 2L), lab("C-301", 3L)));
-        when(candidateAllocationFactory.build(eq(context), any())).thenAnswer(
+        when(candidateAllocationFactory.build(eq(context), any(), any())).thenAnswer(
                 inv -> new CandidateAllocation(context, labRef(inv.getArgument(1), "X" + inv.getArgument(1))));
         when(constraintEngine.evaluate(eq(context), any())).thenReturn(passingEvaluation());
 

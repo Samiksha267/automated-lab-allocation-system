@@ -2,7 +2,7 @@
 
 Requirement IDs are stable identifiers for traceability to tests (unit/integration test names should reference the FR/NFR/HC ID they cover where practical). Hard scheduling constraints (HC-01..HC-12) are specified and, as of Phase 9, fully implemented in [06-CONSTRAINTS.md](06-CONSTRAINTS.md); they are cross-referenced here.
 
-**Status:** Requirements marked ✅ are implemented and verified as of Phase 13. Requirements marked **(partial)** have their underlying hard-constraint logic, candidate generation, scoring, explanation, and/or alternative-suggestion logic implemented and verified (the `ConstraintEngine`, Phase 9; `CandidateGenerator`, Phase 10; `ScoringEngine`, Phase 11; `ExplainableAllocationService`, Phase 12; `AlternativeSuggestionService`, Phase 13) but are not yet reachable through any end-user workflow — the CR-facing booking flow (Phase 15) and PDF import (Phase 19) that will actually call it don't exist yet. Everything else remains planned. Global multi-session backtracking/automatic timetable generation is explicitly **not** part of Phase 13 — still Phase 14.
+**Status:** Requirements marked ✅ are implemented and verified as of Phase 14. Requirements marked **(partial)** have their underlying hard-constraint logic, candidate generation, scoring, explanation, alternative-suggestion, and/or automatic-scheduling logic implemented and verified (the `ConstraintEngine`, Phase 9; `CandidateGenerator`, Phase 10; `ScoringEngine`, Phase 11; `ExplainableAllocationService`, Phase 12; `AlternativeSuggestionService`, Phase 13; `AutomaticSchedulingEngine`, Phase 14) but are not yet reachable through any end-user workflow — the CR-facing booking flow (Phase 15) and PDF import (Phase 19) that will actually call it don't exist yet. Everything else remains planned. Persisting/publishing an automatically-generated schedule, FCFS concurrency, and CR extra-lab booking are explicitly **not** part of Phase 14 — Phase 15/16 own them.
 
 ## Functional Requirements
 
@@ -48,8 +48,8 @@ Requirement IDs are stable identifiers for traceability to tests (unit/integrati
 - **FR-29** Lab Assistant can view all schedules, all detected conflicts, suggested alternatives, and CR activity across all divisions.
 
 ### Automatic Scheduling
-- **FR-30** The system can generate a full multi-session schedule automatically from a set of unscheduled session requirements, using most-constrained-first ordering and backtracking when a session has no valid candidate under the current partial assignment.
-- **FR-31** The system reports which sessions could not be scheduled when no full solution is found within the configured search budget.
+- **FR-30** *(partial)* ✅ The system can generate a full multi-session schedule automatically from a set of unscheduled session requirements, using most-constrained-first ordering and backtracking when a session has no valid candidate under the current partial assignment. *(`AutomaticSchedulingEngine`, Phase 14 — implemented and verified: bounded DFS backtracking with dynamic MRV ordering, reusing the unmodified Phase 9-12 pipeline for every candidate slot. Not yet reachable through any end-user workflow, and never persists a generated schedule — a future phase decides whether/how to commit one.)*
+- **FR-31** *(partial)* ✅ The system reports which sessions could not be scheduled when no full solution is found within the configured search budget. *(Implemented and verified — `AutomaticScheduleResult` distinguishes `PARTIAL`/`NO_SOLUTION`/`SEARCH_LIMIT_REACHED` and reports a real, non-fabricated reason per unscheduled requirement via `ConflictAnalyzer`. Not yet reachable through any end-user workflow.)*
 
 ### Auditability
 - **FR-32** The system records an immutable audit log entry for every consequential action (CR created/assigned, extra lab created/cancelled, allocation approved/rejected, lab/faculty-availability/software-requirement changes, PDF import/approval).

@@ -15,7 +15,7 @@ class SchedulingSlotProviderTest {
 
     private SchedulingSlotPolicy policy(int maxSlotsSearched, int maxLookaheadDays) {
         return new SchedulingSlotPolicy(
-                "09:00", "19:00", 60, "MONDAY,TUESDAY,WEDNESDAY,THURSDAY,FRIDAY,SATURDAY", maxLookaheadDays, maxSlotsSearched, 3);
+                "09:00", "19:00", 60, "MONDAY,TUESDAY,WEDNESDAY,THURSDAY,FRIDAY,SATURDAY", maxLookaheadDays, maxSlotsSearched, 3, 120);
     }
 
     private SchedulingRequest request(LocalDate date, LocalTime start, LocalTime end) {

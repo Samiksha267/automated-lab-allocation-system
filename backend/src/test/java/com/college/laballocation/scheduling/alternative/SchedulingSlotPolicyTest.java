@@ -10,7 +10,7 @@ import org.junit.jupiter.api.Test;
 class SchedulingSlotPolicyTest {
 
     private SchedulingSlotPolicy policy() {
-        return new SchedulingSlotPolicy("09:00", "19:00", 60, "MONDAY,TUESDAY,WEDNESDAY,THURSDAY,FRIDAY,SATURDAY", 3, 6, 3);
+        return new SchedulingSlotPolicy("09:00", "19:00", 60, "MONDAY,TUESDAY,WEDNESDAY,THURSDAY,FRIDAY,SATURDAY", 3, 6, 3, 120);
     }
 
     @Test
@@ -30,19 +30,19 @@ class SchedulingSlotPolicyTest {
 
     @Test
     void dayStartMustBeBeforeDayEnd() {
-        assertThatThrownBy(() -> new SchedulingSlotPolicy("19:00", "09:00", 60, "MONDAY", 3, 6, 3))
+        assertThatThrownBy(() -> new SchedulingSlotPolicy("19:00", "09:00", 60, "MONDAY", 3, 6, 3, 120))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
     void slotStepMustBePositive() {
-        assertThatThrownBy(() -> new SchedulingSlotPolicy("09:00", "19:00", 0, "MONDAY", 3, 6, 3))
+        assertThatThrownBy(() -> new SchedulingSlotPolicy("09:00", "19:00", 0, "MONDAY", 3, 6, 3, 120))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
     void maxAlternativeTimeSlotsSearchedMustBePositive() {
-        assertThatThrownBy(() -> new SchedulingSlotPolicy("09:00", "19:00", 60, "MONDAY", 3, 0, 3))
+        assertThatThrownBy(() -> new SchedulingSlotPolicy("09:00", "19:00", 60, "MONDAY", 3, 0, 3, 120))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 }

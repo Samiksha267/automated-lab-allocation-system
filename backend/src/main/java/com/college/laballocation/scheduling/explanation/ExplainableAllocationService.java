@@ -3,6 +3,7 @@ package com.college.laballocation.scheduling.explanation;
 import com.college.laballocation.scheduling.ConstraintResult;
 import com.college.laballocation.scheduling.SchedulingActor;
 import com.college.laballocation.scheduling.SchedulingRequest;
+import com.college.laballocation.scheduling.automatic.SchedulingSearchState;
 import com.college.laballocation.scheduling.generation.CandidateGenerationResult;
 import com.college.laballocation.scheduling.generation.CandidateGenerator;
 import com.college.laballocation.scheduling.generation.EvaluatedCandidate;
@@ -51,7 +52,21 @@ public class ExplainableAllocationService {
     }
 
     public AllocationRecommendation recommend(SchedulingRequest request) {
-        CandidateGenerationResult generationResult = candidateGenerator.generate(request);
+        return recommend(request, SchedulingSearchState.empty());
+    }
+
+    /**
+     * Identical to {@link #recommend(SchedulingRequest)} except that
+     * candidate generation also sees {@code searchState}'s provisional
+     * decisions (Phase 14, PART 4/5/21) - reusing this exact pipeline is
+     * how the automatic-scheduling engine gets full Phase 11 scoring and
+     * Phase 12 explainability for every candidate slot "for free," with no
+     * duplicated formula. Every existing caller uses
+     * {@link #recommend(SchedulingRequest)} (an empty search state) and is
+     * completely unaffected by this addition.
+     */
+    public AllocationRecommendation recommend(SchedulingRequest request, SchedulingSearchState searchState) {
+        CandidateGenerationResult generationResult = candidateGenerator.generate(request, searchState);
         ScoringResult scoringResult = scoringEngine.score(generationResult);
 
         List<ExplainedValidCandidate> ranked = explainValidCandidates(scoringResult);

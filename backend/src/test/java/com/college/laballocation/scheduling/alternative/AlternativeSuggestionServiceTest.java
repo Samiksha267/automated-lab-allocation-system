@@ -39,7 +39,7 @@ class AlternativeSuggestionServiceTest {
     @BeforeEach
     void setUp() {
         SchedulingSlotPolicy policy =
-                new SchedulingSlotPolicy("09:00", "19:00", 60, "MONDAY,TUESDAY,WEDNESDAY,THURSDAY,FRIDAY,SATURDAY", 3, 6, 3);
+                new SchedulingSlotPolicy("09:00", "19:00", 60, "MONDAY,TUESDAY,WEDNESDAY,THURSDAY,FRIDAY,SATURDAY", 3, 6, 3, 120);
         service = new AlternativeSuggestionService(explainableAllocationService, conflictAnalyzer, new SchedulingSlotProvider(policy), policy);
     }
 

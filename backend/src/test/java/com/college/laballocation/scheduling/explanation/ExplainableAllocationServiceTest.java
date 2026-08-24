@@ -115,7 +115,7 @@ class ExplainableAllocationServiceTest {
         ScoredCandidate scoredB = scored(b, 42, 60, applied(ScoringFactorId.CAPACITY_FIT, 42, 60));
         ScoringResult scoringResult =
                 new ScoringResult(request(), List.of(scoredA, scoredB), 2, List.of(ScoringFactorId.CAPACITY_FIT));
-        when(candidateGenerator.generate(any())).thenReturn(generationResult);
+        when(candidateGenerator.generate(any(), any())).thenReturn(generationResult);
         when(scoringEngine.score(any())).thenReturn(scoringResult);
 
         AllocationRecommendation recommendation = service.recommend(request());
@@ -132,7 +132,7 @@ class ExplainableAllocationServiceTest {
                 new ConstraintViolation("CAPACITY_VIOLATION", "too small", "LAB", "A-101", Map.of()));
         CandidateGenerationResult generationResult = new CandidateGenerationResult(request(), List.of(invalidCandidate));
         ScoringResult scoringResult = new ScoringResult(request(), List.of(), 0, List.of(ScoringFactorId.CAPACITY_FIT));
-        when(candidateGenerator.generate(any())).thenReturn(generationResult);
+        when(candidateGenerator.generate(any(), any())).thenReturn(generationResult);
         when(scoringEngine.score(any())).thenReturn(scoringResult);
 
         AllocationRecommendation recommendation = service.recommend(request());
@@ -153,7 +153,7 @@ class ExplainableAllocationServiceTest {
                 new CandidateGenerationResult(request(), List.of(validOne, invalidOne));
         ScoredCandidate scoredA = scored(validOne, 30, 30, applied(ScoringFactorId.CAPACITY_FIT, 30, 30));
         ScoringResult scoringResult = new ScoringResult(request(), List.of(scoredA), 1, List.of(ScoringFactorId.CAPACITY_FIT));
-        when(candidateGenerator.generate(any())).thenReturn(generationResult);
+        when(candidateGenerator.generate(any(), any())).thenReturn(generationResult);
         when(scoringEngine.score(any())).thenReturn(scoringResult);
 
         AllocationRecommendation recommendation = service.recommend(request());
@@ -172,7 +172,7 @@ class ExplainableAllocationServiceTest {
                 new ConstraintViolation("SOFTWARE_MISMATCH", "missing cloudera", "LAB", "A-101", Map.of()));
         CandidateGenerationResult generationResult = new CandidateGenerationResult(request(), List.of(invalidOne));
         ScoringResult scoringResult = new ScoringResult(request(), List.of(), 0, List.of(ScoringFactorId.CAPACITY_FIT));
-        when(candidateGenerator.generate(any())).thenReturn(generationResult);
+        when(candidateGenerator.generate(any(), any())).thenReturn(generationResult);
         when(scoringEngine.score(any())).thenReturn(scoringResult);
 
         AllocationRecommendation recommendation = service.recommend(request());
@@ -192,7 +192,7 @@ class ExplainableAllocationServiceTest {
         ScoringResult scoringResult = new ScoringResult(
                 request(), List.of(scoredA), 1,
                 List.of(ScoringFactorId.CAPACITY_FIT, ScoringFactorId.PREFERRED_LAB_TYPE, ScoringFactorId.BALANCED_UTILIZATION));
-        when(candidateGenerator.generate(any())).thenReturn(new CandidateGenerationResult(request(), List.of(a)));
+        when(candidateGenerator.generate(any(), any())).thenReturn(new CandidateGenerationResult(request(), List.of(a)));
         when(scoringEngine.score(any())).thenReturn(scoringResult);
 
         AllocationRecommendation recommendation = service.recommend(request());
@@ -211,7 +211,7 @@ class ExplainableAllocationServiceTest {
         ScoredCandidate scoredA = scored(a, 20, 30, capacity, notApplicable);
         ScoringResult scoringResult =
                 new ScoringResult(request(), List.of(scoredA), 1, List.of(ScoringFactorId.CAPACITY_FIT, ScoringFactorId.PREFERRED_LAB_TYPE));
-        when(candidateGenerator.generate(any())).thenReturn(new CandidateGenerationResult(request(), List.of(a)));
+        when(candidateGenerator.generate(any(), any())).thenReturn(new CandidateGenerationResult(request(), List.of(a)));
         when(scoringEngine.score(any())).thenReturn(scoringResult);
 
         AllocationRecommendation recommendation = service.recommend(request());
@@ -231,7 +231,7 @@ class ExplainableAllocationServiceTest {
                 ConstraintResult.notApplicable(HardConstraintId.HC_11_CR_AUTHORIZATION));
         ScoredCandidate scoredA = scored(a, 30, 30, applied(ScoringFactorId.CAPACITY_FIT, 30, 30));
         ScoringResult scoringResult = new ScoringResult(req, List.of(scoredA), 1, List.of(ScoringFactorId.CAPACITY_FIT));
-        when(candidateGenerator.generate(any())).thenReturn(new CandidateGenerationResult(req, List.of(a)));
+        when(candidateGenerator.generate(any(), any())).thenReturn(new CandidateGenerationResult(req, List.of(a)));
         when(scoringEngine.score(any())).thenReturn(scoringResult);
 
         AllocationRecommendation recommendation = service.recommend(req);
@@ -253,7 +253,7 @@ class ExplainableAllocationServiceTest {
         ScoredCandidate scoredA = scored(a, 30, 60, applied(ScoringFactorId.CAPACITY_FIT, 30, 60));
         ScoredCandidate scoredB = scored(b, 30, 60, applied(ScoringFactorId.CAPACITY_FIT, 30, 60));
         ScoringResult scoringResult = new ScoringResult(request(), List.of(scoredA, scoredB), 2, List.of(ScoringFactorId.CAPACITY_FIT));
-        when(candidateGenerator.generate(any())).thenReturn(new CandidateGenerationResult(request(), List.of(a, b)));
+        when(candidateGenerator.generate(any(), any())).thenReturn(new CandidateGenerationResult(request(), List.of(a, b)));
         when(scoringEngine.score(any())).thenReturn(scoringResult);
 
         AllocationRecommendation recommendation = service.recommend(request());
@@ -273,7 +273,7 @@ class ExplainableAllocationServiceTest {
                 new ConstraintViolation("CAPACITY_VIOLATION", "x", "LAB", "B-201", Map.of()));
         CandidateGenerationResult generationResult = new CandidateGenerationResult(request(), List.of(labA, labB));
         ScoringResult scoringResult = new ScoringResult(request(), List.of(), 0, List.of(ScoringFactorId.CAPACITY_FIT));
-        when(candidateGenerator.generate(any())).thenReturn(generationResult);
+        when(candidateGenerator.generate(any(), any())).thenReturn(generationResult);
         when(scoringEngine.score(any())).thenReturn(scoringResult);
 
         AllocationRecommendation recommendation = service.recommend(request());

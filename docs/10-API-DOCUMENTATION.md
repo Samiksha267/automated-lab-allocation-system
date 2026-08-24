@@ -135,6 +135,8 @@ Actual paths differ from the Phase 1 sketch (flat, resource-per-noun, not nested
 
 **Phase 13 (Conflict Analysis + Alternative Suggestions) remains internal, same as Phase 10/11/12** — no `POST /api/scheduling/alternatives` or equivalent was added. `AlternativeSuggestionService` was verified via unit/integration tests and a temporary dev-profile harness against the live Dockerized stack, never through a production HTTP surface. Phase 15 is where the real CR-facing endpoint above will actually call into `AlternativeSuggestionService`.
 
+**Phase 14 (Automatic Scheduling / Multi-Session Backtracking) is likewise internal only** — no `POST /api/scheduling/automatic` or equivalent exists. `AutomaticSchedulingEngine` was verified via unit/integration tests and a temporary dev-profile harness against the live Dockerized stack, never through a production HTTP surface. It produces a proposed, unpersisted schedule only; no endpoint to commit/publish one exists in any phase yet.
+
 ### Subject Requirements — **implemented (Phase 6)**
 
 `GET .../requirements` reflects **only what the subject requires** — it never checks against any lab, and is intentionally a separate fact from Phase 5's lab capability endpoints. See docs/03-SYSTEM-ARCHITECTURE.md §14 for why the two are deliberately never combined by this phase.

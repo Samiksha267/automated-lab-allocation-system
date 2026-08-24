@@ -1,6 +1,6 @@
 # Scheduling Engine
 
-**Status (Phase 13):** Candidate Generation (Phase 10), Scoring (Phase 11), Explainable Allocation (Phase 12), and now Conflict Analysis + Alternative Suggestions (Phase 13) all exist as tested code. `CandidateGenerator` (`com.college.laballocation.scheduling.generation`) takes one `SchedulingRequest`, builds its `SchedulingContext` once, and produces an `EvaluatedCandidate` for every lab via the unmodified Phase 9 `ConstraintEngine`. `ScoringEngine` (`com.college.laballocation.scheduling.scoring`) ranks only the *valid* candidates using Capacity Fit, Preferred Lab Type, and Balanced Utilization. `ExplainableAllocationService` (`com.college.laballocation.scheduling.explanation`, Phase 12) combines both into one structured `AllocationRecommendation`. `ConflictAnalyzer` (`com.college.laballocation.scheduling.conflict`) and `AlternativeSuggestionService` (`com.college.laballocation.scheduling.alternative`, Phase 13) sit one layer above: when the requested time has no valid candidate, they classify why (structural vs. temporal) and, only when genuinely worthwhile, search a small, bounded set of alternative times using the exact same generate→score→explain pipeline. **No candidate is ever automatically selected/persisted, no backtracking, no moving of existing sessions, no FCFS/CR-booking** — every result remains advisory, describing a snapshot, never a booking. `SchedulingMetrics` remains design-only, deferred to Phase 25.
+**Status (Phase 14):** Candidate Generation (Phase 10), Scoring (Phase 11), Explainable Allocation (Phase 12), Conflict Analysis + Alternative Suggestions (Phase 13), and now Automatic Scheduling / Multi-Session Backtracking (Phase 14) all exist as tested code. `CandidateGenerator` (`com.college.laballocation.scheduling.generation`) takes one `SchedulingRequest`, builds its `SchedulingContext` once, and produces an `EvaluatedCandidate` for every lab via the unmodified Phase 9 `ConstraintEngine`. `ScoringEngine` (`com.college.laballocation.scheduling.scoring`) ranks only the *valid* candidates. `ExplainableAllocationService` (`com.college.laballocation.scheduling.explanation`, Phase 12) combines both into one structured `AllocationRecommendation`. `ConflictAnalyzer`/`AlternativeSuggestionService` (Phase 13) classify and search alternative times for one request. `AutomaticSchedulingEngine` (`com.college.laballocation.scheduling.automatic`, Phase 14) sits one layer above all of them: given *multiple* session requirements at once, it uses bounded depth-first backtracking with Minimum-Remaining-Values (MRV) ordering to find a coherent schedule, reusing the exact same generate→score→explain pipeline for every candidate it considers - extended, additively, so the unmodified Phase 9 conflict constraints (HC-01/02/04/05) see both persisted and this-search's-own provisional decisions. **No candidate is ever automatically selected/persisted, no moving of existing sessions, no FCFS/CR-booking, no concurrency guarantee** — every result remains advisory, describing a snapshot, never a booking. `SchedulingMetrics` remains design-only, deferred to Phase 25.
 
 ## Candidate Generation (Phase 10)
 
@@ -239,7 +239,8 @@ This is a **Constraint Satisfaction Problem (CSP)** for single-session validatio
 | `ExplainableAllocationService` / `AllocationRecommendation` / `ExplainedValidCandidate` / `RejectedCandidateExplanation` / `RejectionSummary` | **Implemented (Phase 12)** | `ExplainableAllocationService.recommend(request)` (a `@Service`) orchestrates `CandidateGenerator` + `ScoringEngine`, then converts the results into one structured `AllocationRecommendation` — advisory only, named deliberately not `AllocationDecision`. See "Explainable Allocation" section above. |
 | `ConflictAnalyzer` / `ConflictAnalysis` / `ConflictDetail` | **Implemented (Phase 13)** | Pure transformation of an already-computed `AllocationRecommendation` into structural-vs-temporal classified conflict data - never queries a repository or re-evaluates a constraint. See "Conflict Analysis + Alternative Suggestions" section above. |
 | `AlternativeSuggestionService` / `AlternativeSuggestion` / `AlternativeSearchResult` / `SchedulingSlotProvider` / `SchedulingSlotPolicy` | **Implemented (Phase 13)** | The Phase 13 fallback-suggestion layer - a ranked fallback suggestion (different lab and/or different time) when the originally requested slot fails. Distinct from Phase 12's `otherValidCandidates()`, which uses only the same requested time. |
-| `SchedulingMetrics` | Not yet implemented | Counters: candidates evaluated, constraints checked, backtrack count, execution time — for [16-PERFORMANCE-BENCHMARKS.md](16-PERFORMANCE-BENCHMARKS.md), Phase 14/25. |
+| `AutomaticSchedulingEngine` / `SessionRequirement` / `AutomaticSchedulingRequest` / `SchedulingSearchState` / `PlannedAllocation` / `AutomaticScheduleResult` / `SearchStatistics` | **Implemented (Phase 14)** | Bounded DFS backtracking with dynamic MRV over multiple `SessionRequirement`s at once - see "Automatic Scheduling / Multi-Session Backtracking" section above. `SearchStatistics` (`nodesExplored`/`backtracks`/`maxDepthReached`/`choicesEvaluated`/`searchLimitReached`) is this phase's realized version of the design-only `SchedulingMetrics` sketch below, precisely scoped to what the search actually tracks. |
+| `SchedulingMetrics` | Not yet implemented (superseded in scope by `SearchStatistics`, Phase 14) | A broader cross-phase metrics concept (constraints checked, execution time) than Phase 14 needed - `SearchStatistics` covers the search-specific counters; a general execution-time/constraints-checked metric remains [16-PERFORMANCE-BENCHMARKS.md](16-PERFORMANCE-BENCHMARKS.md)'s concern, Phase 25. |
 
 `constraint`, `scoring`, `conflict`, and the core scheduler operate **only** on these objects — never on JPA entities or DTOs directly (verified: none of `SchedulingRequest`/`SchedulingContext`/`CandidateAllocation`/`ConstraintResult`/`ConstraintViolation`/`ConstraintEvaluation` carries a single JPA annotation). Application services in the `scheduling` package are the translation boundary (load entities → build `SchedulingContext` via `SchedulingContextFactory` → build `CandidateAllocation` via `CandidateAllocationFactory` → `ConstraintEngine` validates → Phase 15/19 will persist an `Allocation`).
 
@@ -269,59 +270,88 @@ Build AllocationRecommendation: recommended candidate + ranked valid alternative
 
 **Correction to the original Phase 1 sketch:** the line above originally read "Generate Candidate Labs (active + capacity ≥ required + required software/equipment/type present)" - i.e. prefiltering by the same conditions the hard constraints check. Phase 10 deliberately did **not** implement it that way (PART 9/10/24 of the Phase 10 brief): prefiltering by capacity/software/type would duplicate HC-07/08/10's own logic in a second place, risking Phase 9 and Phase 10 silently disagreeing, and would make a rejected lab's reason unrecoverable (a prefiltered-out lab never becomes a candidate at all, so there is no `ConstraintViolation` to show a CR later explaining "why isn't C-304 in the list"). `CandidateGenerator` generates from every lab and lets the real `ConstraintEngine` be the sole source of truth for validity - see "Candidate Generation" above and ADR in docs/15-DESIGN-DECISIONS.md. "Remove Invalid Candidates" (the original sketch's next step) is also not a separate step in the real implementation - `CandidateGenerationResult` keeps both `validCandidates()` and `invalidCandidates()` as filtered views, never physically discarding the rejected ones, since Phase 12/13 need them.
 
-## Multi-Session Automatic Generation (Phase 14) — Pseudocode
+## Automatic Scheduling / Multi-Session Backtracking (Phase 14) — Implemented
+
+**Correction to the Phase 1 sketch above:** the pseudocode this section originally carried (`generateSchedule`/`backtrack` over `List<SchedulingRequest>`, `orderByMostConstrainedFirst` computed once, a `timeout`-based bound) was a design placeholder, never executed code. The real implementation differs in several material ways, documented explicitly rather than silently: input is `List<SessionRequirement>` (a request has no date/time yet - `SchedulingRequest` is only ever constructed once a concrete slot is chosen), MRV is **dynamic** (recomputed at every recursion node, not once at the top), the search bound is a single **node count** (not attempts/depth/timeout together), and the result carries four distinct statuses (`COMPLETE`/`PARTIAL`/`NO_SOLUTION`/`SEARCH_LIMIT_REACHED`) rather than a binary `SUCCESS`/`PARTIAL`.
+
+### Problem Formulation
+
+Given a set of `SessionRequirement`s ("what must be scheduled" - subject/faculty/division/batch/actor/term, no time yet) and a bounded `[startDate, endDate]` window, find an assignment of `(date, startTime, endTime, lab)` to as many requirements as possible such that every hard constraint (HC-01..HC-12) holds for every assignment **and** for every pair of assignments made in the same search (no two assignments may conflict with each other, even though neither is persisted yet). This is a Constraint Satisfaction Problem (CSP): each requirement is a variable, its domain is every valid `(slot, lab)` combination, and HC-01/02/04/05 are the binary constraints coupling different requirements' domains together.
+
+### Session Requirement vs. Scheduling Request
+
+`SessionRequirement` ("what must be scheduled?") is deliberately distinct from `SchedulingRequest` ("evaluate this session at this concrete date/time," Phase 8) - Phase 8's invariants (a `BATCH` request needs a `batchId`, `startTime < endTime`) are never weakened to accommodate an unknown time; instead `SessionRequirement.toRequest(TimeSlot)` combines a requirement with a chosen slot into a real, fully-validated `SchedulingRequest` only once a concrete slot is actually being evaluated. Every requirement carries a caller-supplied, unique `key` (validated at `AutomaticSchedulingRequest` construction) so a result can map back to its input without relying on list position.
+
+### Search State - Provisional Occupancy
+
+`SchedulingSearchState` is the immutable, in-memory record of every provisional decision (`PlannedAllocation`) made so far in the current search branch. It is never persisted and never queried into the database - `SchedulingSearchState.with(assignment)` returns a *new* state, so "backtracking" a branch is simply discarding the child state and continuing with the parent, never an explicit undo that could corrupt a sibling branch (immutable-over-mutable was the deliberate choice here: correctness/explainability outweigh the extra allocation cost at this project's scale).
+
+### Constraint Integration - the Actual Extension Point
+
+The design investigation (this phase's required first step) found HC-01/02/04/05 already read conflict data exclusively from four candidate-independent/candidate-specific lists of `ExistingAllocationSnapshot` - `context.existingFacultyAllocations()`/`existingBatchAllocations()`/`existingDivisionAllocations()` (built by `SchedulingContextFactory`) and `candidate.lab().existingAllocations()` (built by `CandidateAllocationFactory`). Since `ExistingAllocationSnapshot` is a plain record with no JPA dependency, the smallest clean extension was: give `SchedulingContextFactory.build(...)`, `CandidateAllocationFactory.build(...)`, and `CandidateGenerator.generate(...)` new **additive overloads** that accept a `SchedulingSearchState` and append its matching provisional snapshots (`SchedulingSearchState.forFaculty/forBatch/forDivision/forLab`) onto the exact same lists the unmodified constraints already read. `ExplainableAllocationService` gained one matching overload, `recommend(request, searchState)`, threading the state straight through.
+
+**No constraint class was touched.** HC-01/02/04/05 cannot tell, and do not need to know, whether one entry in the list it's iterating came from PostgreSQL or from this search - there remains exactly one place that decides validity (`ConstraintEngine`), and every existing caller (Phase 12/13, and every pre-Phase-14 test) uses the original single-argument overloads unchanged, verified by the full existing test suite passing without modification.
+
+### Backtracking Algorithm (as implemented)
 
 ```
-function generateSchedule(requests: List<SchedulingRequest>, context: SchedulingContext) -> ScheduleResult:
-    ordered = orderByMostConstrainedFirst(requests, context)
-    return backtrack(ordered, index=0, partialAssignment={}, context, metrics)
+schedule(requirements, [startDate, endDate]):
+    if requirements is empty: return COMPLETE, no assignments
+    slots = SchedulingSlotProvider.generateSlotsInRange(startDate, endDate, policy.sessionDuration())
+    return solve(requirements, SchedulingSearchState.empty(), slots)
 
-function backtrack(ordered, index, partialAssignment, context, metrics) -> ScheduleResult:
-    if index == len(ordered):
-        return SUCCESS(partialAssignment)
-    if metrics.attempts > MAX_ATTEMPTS or metrics.elapsed > TIMEOUT or depth(partialAssignment) > MAX_DEPTH:
-        return PARTIAL(partialAssignment, unresolved = ordered[index:])
+solve(unassigned, state, slots):
+    nodesExplored += 1
+    observe(state)                                   // track the largest state ever reached, for PARTIAL/NO_SOLUTION reporting
+    if nodesExplored > maxNodes: searchLimitReached = true; return FAILURE
+    if unassigned is empty: return SUCCESS(state)
 
-    request = ordered[index]
-    candidates = generateAndScoreCandidates(request, context, partialAssignment)   // pipeline above, scoped to context + tentative assignments so far
-    for candidate in candidates.sortedByScoreDescending():
-        metrics.candidateEvaluations += 1
-        tentativelyApply(partialAssignment, request, candidate)
-        result = backtrack(ordered, index + 1, partialAssignment, context, metrics)
-        if result is SUCCESS:
-            return result
-        undo(partialAssignment, request, candidate)   // backtrack
-        metrics.backtrackCount += 1
+    next, choices = pickMostConstrained(unassigned, slots, state)   // MRV - see below
+    remaining = unassigned - next
 
-    return FAILURE_AT(request)   // triggers caller to try previous request's next candidate, or report unresolved
+    for choice in choices:                            // already ordered: score desc, date asc, time asc, lab code asc
+        choicesEvaluated += 1
+        childState = state.with(PlannedAllocation(next.key, choice.request, choice.candidate))
+        outcome = solve(remaining, childState, slots)
+        if outcome is SUCCESS: return outcome
+        if searchLimitReached: return FAILURE           // propagate immediately, do not keep trying siblings
+        backtracks += 1                                 // this choice's whole subtree failed - undo and try the next one
+
+    return FAILURE
 ```
 
-### Most-Constrained-First Heuristic
+`pickMostConstrained` computes `computeChoices(requirement, slots, state)` for **every** currently-unassigned requirement at this node (dynamic MRV, PART 18 of the Phase 14 brief - more expensive per node than a static, once-computed order, but structurally more powerful: it reacts to exactly what earlier choices in *this* branch have already consumed) and picks the one with the fewest valid choices, ties broken by `key` ascending.
 
-```
-difficulty(request) = 1 / max(1, numberOfValidCandidates(request, context))
-```
+`computeChoices` calls `ExplainableAllocationService.recommend(concreteRequest, state)` once per slot in the range - reusing the real, unmodified Phase 10/11/12 pipeline for every (slot, lab) combination; this class never itself decides validity or computes a score. Unlike Phase 13's alternative-suggestion heuristic (which keeps only the best lab per slot, PART 45 of the Phase 13 brief), Phase 14 keeps **every** valid lab per slot as a separate choice - the full branching structure is what backtracking needs to demonstrate and exercise "this requirement could use lab X or lab Y at the same time," which a best-per-slot simplification would silently eliminate.
 
-Requests are sorted by descending `difficulty` before search begins — a session needing rare software, large capacity, or a faculty with a narrow availability window is scheduled first, while flexible sessions (few requirements, many valid labs) are scheduled last, since they're the easiest to still satisfy after earlier, harder sessions have consumed resources. This is recomputed once per top-level `generateSchedule` call (not re-sorted at every backtrack step, to bound cost — see complexity note below); if this proves too coarse in practice (Phase 14 implementation may reveal it), a dynamic re-ordering variant will be documented as a follow-up, not assumed to work perfectly a priori.
+### Termination and Search Limits
 
-### Backtracking, Pruning, and Search Limits
-
-- **Pruning:** candidates are generated already hard-constraint-filtered (never generate an invalid candidate just to reject it during backtracking) — this is the primary pruning mechanism, not a separate step.
-- **`maxAttempts`:** total candidate-assignment attempts across the whole search (configurable, e.g. 5000 for a realistic term-sized problem).
-- **`maxDepth`:** the search never backtracks further back than this many completed assignments before giving up on full-solution search and returning the best partial result found (protects against pathological thrashing).
-- **`timeout`:** wall-clock budget (e.g. 10s) as a hard stop regardless of attempts/depth remaining — this is the safety net for demo/interactive use.
-- **Failure diagnostics:** on `PARTIAL` result, `SchedulingMetrics` + the list of `unresolved` requests (each with their last-seen rejection reasons) are returned — never a bare "scheduling failed."
+- **`app.scheduling.backtracking.max-nodes`** (default 2000) - the hard node-count bound (PART 35/39: one recursive `solve` call = one node). Exceeding it sets `searchLimitReached = true` and unwinds immediately without exploring further siblings.
+- **`app.scheduling.backtracking.max-requirements`** (default 20) and **`max-date-range-days`** (default 31) - validated before search begins (`ApiException`, `VALIDATION_ERROR`), guarding against a pathologically large slot universe (`H` valid hours/day × `D` days) inflating the per-node MRV cost.
+- **`PARTIAL` vs. `NO_SOLUTION` vs. `SEARCH_LIMIT_REACHED`:** the search tracks the *largest* state ever reached anywhere during the whole search (`observe(state)`, independent of whether that branch was later abandoned). If the search fully exhausts every branch within budget and that largest state has zero assignments, the request is provably infeasible from the very first requirement (`NO_SOLUTION`). If it has some but not all, a complete schedule is provably impossible but a genuinely useful partial one exists (`PARTIAL`). If the node budget was exhausted first, the true answer is unknown (`SEARCH_LIMIT_REACHED` - "we stopped searching," never "this is impossible," PART 52).
+- **Failure diagnostics:** for every unscheduled requirement in the returned result, one representative `recommend(...)` call against the final state (the first slot in the range) is analyzed via `ConflictAnalyzer` and its `RejectionSummary` reported - honestly scoped to that one slot's reasons, never claimed to summarize every slot in the range.
 
 ### Complexity
 
-Backtracking search over a CSP is worst-case **exponential** in the number of sessions (each session has up to `|labs| × |validTimeSlots|` candidate assignments, and the search explores a tree of depth = number of sessions). This is **not** claimed to be polynomial anywhere in this project's documentation. In practice:
-- Hard-constraint pre-filtering keeps the *branching factor* per session small (usually far fewer than `|labs|` valid candidates once software/capacity/faculty-availability narrow the field).
-- Most-constrained-first ordering empirically reduces backtracking by resolving the tightest sessions — with the fewest valid options — while the most resource slack still remains, so later (easier) sessions rarely force a backtrack.
-- The configured `maxAttempts`/`maxDepth`/`timeout` bound worst-case runtime at the cost of potentially returning a partial (not full) schedule on pathological inputs — this trade-off is deliberate and documented, not hidden.
-- Real, measured numbers (not estimates) for the actual dataset size (~15 labs, tens of sessions) will be recorded in [16-PERFORMANCE-BENCHMARKS.md](16-PERFORMANCE-BENCHMARKS.md) once Phase 14/25 produce them — no number is asserted here in advance.
+Backtracking search over a CSP is worst-case **exponential** in the number of requirements - this is not claimed to be polynomial anywhere in this project's documentation. Concretely, for `H` valid start hours/day (9, at the confirmed 09:00-19:00/2-hour policy), `D` candidate days, and `R` requirements: the raw slot universe is `H × D`, MRV's per-node cost is `O(R_unassigned × H × D)` `recommend()` calls (each itself `O(labs)`, per Phase 10/11's own documented cost), and the search explores at most `maxNodes` such nodes before giving up. Dynamic MRV was chosen deliberately over a once-computed static order specifically because it structurally *prevents* backtracking in many otherwise-conflicting cases (see the worked example below) - at the cost of that extra per-node computation, a trade-off this project accepts at its demonstrated scale (a handful of requirements, ~15 labs, a date range measured in days). No formal benchmark is claimed; Phase 25 owns that.
+
+### Determinism
+
+`SchedulingSlotProvider.generateSlotsInRange` produces a plain, explicitly-sorted `List` (date ascending, then time ascending) - never a `HashSet`/`HashMap` or database row order. MRV's tie-break (`key` ascending) and each requirement's own choice ordering (score descending, then date, then time, then lab code) are likewise explicit `Comparator` chains. Identical input and database state always produce an identical assignment, ordering, and search statistics.
+
+### Worked Example - Why MRV Usually Avoids the Backtracking a Naive Greedy Would Need
+
+Two requirements, one shared 09:00-11:00 slot, two labs X and Y: R1 can use X (score 90) or Y (score 50); R2 can use only X. A naive greedy that processes requirements in input order (R1 then R2, ignoring how constrained each one is) picks R1's top choice, X - then R2 has nothing left and fails outright, exactly the scenario this phase's brief describes.
+
+With MRV, the solver instead measures both requirements' valid-choice counts *before* committing to either: R1 has 2, R2 has 1. Being more constrained, R2 is scheduled first (→ X, its only option); R1 is then evaluated with X already provisionally taken and correctly falls back to its only remaining choice, Y. **The complete schedule (R1→Y, R2→X) is found with zero backtracks** - MRV's adaptive ordering, not undo/retry, is what avoided the naive-greedy failure here. This is verified directly (`AutomaticSchedulingEngineTest.mrvSchedulesTheMoreConstrainedRequirementFirstAvoidingBacktracking`).
+
+The underlying backtracking/undo mechanism is still real and still necessary - it is what a naive fixed-order solver *would* need, and what MRV falls back on whenever a genuine tie or deeper interaction prevents choice-count alone from fully determining the right order. `AutomaticSchedulingEngineTest` proves this mechanism directly and honestly, by running the identical R1(X-or-Y)/R2(X-only) scenario through the engine's `useMrv=false` path (package-visible, test-only - production code always uses the public, MRV-enabled overload): with a fixed R1-then-R2 order, R1 tries X first, R2 then has zero choices, the search **backtracks** to R1's next choice (Y), and R2 then succeeds with X - `COMPLETE`, `backtracks > 0`, proven with a real assertion, not merely asserted to exist.
 
 ## Limitations (documented honestly, per project rules against overclaiming)
 
-- No guarantee of a globally *optimal* schedule — only a valid one found within budget, ranked by local (per-session) scoring at assignment time.
-- A `PARTIAL` result requires a human (Lab Assistant) to resolve remaining unscheduled sessions manually or by relaxing an input (e.g., widening a time window) — the engine does not automatically negotiate trade-offs across sessions beyond backtracking.
-- Faculty/lab preference scoring factors are local heuristics, not lookahead — the engine does not attempt to foresee that a "good enough" choice now will block a much better outcome for a later session, beyond what backtracking naturally corrects when that later session fails outright.
+- No guarantee of a globally *optimal* schedule — only a valid one found within budget, ranked by local (per-requirement) scoring at assignment time.
+- A `PARTIAL`/`NO_SOLUTION` result requires a human (Lab Assistant) to resolve remaining unscheduled requirements manually or by relaxing an input (e.g., widening the date range) — the engine does not automatically negotiate trade-offs across requirements beyond backtracking.
+- Scoring factors are local heuristics, not lookahead — the engine does not attempt to foresee that a "good enough" choice now will block a much better outcome for a later requirement, beyond what backtracking naturally corrects when that later requirement fails outright.
+- **Balanced Utilization scoring sees only persisted, `PUBLISHED`-schedule-version utilization** (Phase 11's `LabUtilizationService`, unchanged) — it does not account for *this search's own* provisional assignments when comparing labs' relative load. This is a deliberate, documented Phase 14 heuristic simplification (its brief's PART 22 explicitly permits it), not an oversight: incorporating provisional utilization would require `LabUtilizationService` to also merge `SchedulingSearchState`, which was judged unnecessary complexity for a soft-scoring factor when the hard-conflict constraints (HC-01/02/04/05, which matter far more) already see provisional occupancy correctly.
+- Automatic scheduling is advisory only, exactly like Phase 12/13's results — a returned schedule can become stale the instant the read transaction ends; nothing is reserved. Phase 16 owns commit-time revalidation and concurrency safety.
+- No `ScheduleVersion` is ever created or published by this phase, and no `Allocation` row is ever written — a later, not-yet-built workflow decides whether/how to commit a proposed schedule.

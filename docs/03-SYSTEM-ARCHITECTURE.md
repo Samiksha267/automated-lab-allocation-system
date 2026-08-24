@@ -808,3 +808,59 @@ Per the phase brief's explicit stop condition (its PART 75), the repository was 
 ### Verified end-to-end (Dockerized, 2026-08-23)
 
 A temporary `@Profile("dev")`-only `ApplicationRunner` (`DevAlternativeVerificationRunner`, deleted after use, same safe pattern as Phase 9-12's) exercised the real `AlternativeSuggestionService` against the real dev-seeded BDA/CNS demo data over live Docker/Postgres. All required scenarios matched: occupying B-301 with a different batch/faculty (CNS/A2) at the requested BDA/A1 time resolved via same-time-different-lab (`C-202` recommended), needing zero alternative-time search; requesting BDA/A1 during Faculty BDA's real seeded Monday 12:00-14:00 unavailability gap correctly produced `NO_VALID_CANDIDATE` with 3 structurally-viable Cloudera labs (`[9, 3, 5]`) and found a real alternative (`10:00-12:00 C-202`, the closest valid time) - simultaneously proving the required "mixed structural+temporal" case, since the same run's rejected candidates included both software-only-structural and faculty-only-temporal failures; persisting a genuine batch-A1 session at the requested time (batch conflict) forced every lab to fail `BATCH_CONFLICT` uniformly and still found a valid later time; temporarily inflating batch A1's strength made every candidate structurally impossible and confirmed `slotsSearched=0` - the time-search loop was never entered at all; and a real, persisted A1 (BDA) session at 09:00-11:00 did not prevent A2 (CNS) from receiving its own valid same-time recommendation on a different lab (`D-101`), proving no false `DIVISION_CONFLICT`. The `allocation` table's row count was confirmed identical before and after the full run via `psql`, and every temporary mutation (persisted test allocations, the inflated batch strength) was reverted immediately after its own scenario rather than batched at the end, after an initial verification pass caught cross-scenario contamination from batched cleanup (documented in the completion report's Real Bugs Found). Regression re-verified: all Phase 3-12 endpoints still 200; `/api/allocations` still 404 both directions; Flyway still at schema version 10; dev-seeded lab count confirmed 15.
+
+## 22. Phase 14 — Automatic Scheduling / Multi-Session Backtracking (implemented)
+
+### Pipeline
+
+```mermaid
+flowchart TD
+    Req["List of SessionRequirement + date range"] --> Engine[AutomaticSchedulingEngine.schedule]
+    Engine --> Slots["SchedulingSlotProvider.generateSlotsInRange (Phase 13 policy, extended)"]
+    Engine --> Solve[solve: dynamic MRV + bounded DFS backtracking]
+    Solve -->|per candidate slot| Explain["ExplainableAllocationService.recommend(request, searchState)"]
+    Explain --> CG["CandidateGenerator.generate(request, searchState) - extended, additive overload"]
+    CG --> SCF["SchedulingContextFactory.build(request, searchState) - extended, additive overload"]
+    CG --> CAF["CandidateAllocationFactory.build(context, labId, searchState) - extended, additive overload"]
+    SCF --> CE[ConstraintEngine - completely unmodified]
+    CAF --> CE
+    CE --> Solve
+    Solve --> Result[AutomaticScheduleResult: COMPLETE / PARTIAL / NO_SOLUTION / SEARCH_LIMIT_REACHED]
+```
+
+`SchedulingSearchState` (this search's own provisional decisions) flows alongside the database's persisted allocations into the exact same `ExistingAllocationSnapshot` lists HC-01/02/04/05 already read - no constraint class was touched. See docs/05-SCHEDULING-ENGINE.md "Automatic Scheduling / Multi-Session Backtracking" for the full algorithm, MRV, complexity, and a worked greedy-failure/backtracking-success example.
+
+### New backend additions (Phase 14)
+
+```
+com.college.laballocation.scheduling.automatic/   AutomaticSchedulingEngine (@Service)
+                                                    SessionRequirement / AutomaticSchedulingRequest
+                                                    SchedulingSearchState / PlannedAllocation / SchedulingChoice
+                                                    AutomaticScheduleResult / AutomaticScheduleStatus / SearchStatistics / UnscheduledRequirement
+                                                    AutomaticSchedulingConfiguration (@Component, app.scheduling.backtracking.* config)
+com.college.laballocation.scheduling.alternative/  TimeSlot (new) - SchedulingSlotProvider gained generateSlotsInRange(...)
+                                                    SchedulingSlotPolicy gained sessionDuration() (explicit, since Phase 14 has no
+                                                    original request to derive a duration from, unlike Phase 13)
+com.college.laballocation.scheduling/              SchedulingContextFactory / CandidateAllocationFactory gained additive
+                                                     SchedulingSearchState-aware overloads (Phase 8/9, extended not rewritten)
+com.college.laballocation.scheduling.generation/   CandidateGenerator gained an additive SchedulingSearchState-aware overload (Phase 10, extended)
+com.college.laballocation.scheduling.explanation/  ExplainableAllocationService gained an additive SchedulingSearchState-aware overload (Phase 12, extended)
+```
+
+Every extension above is a **new overloaded method** alongside the original - every pre-Phase-14 caller (Phase 12/13, every pre-Phase-14 test) uses the original single/two-argument overloads completely unchanged, verified by the full pre-existing test suite (234 tests) passing without any behavioral modification.
+
+No new migration - Phase 14 is entirely transient algorithmic/domain code against the existing Phase 8-13 schema and services, confirmed live: Flyway remained at schema version 10 after this phase's work.
+
+### No stored "sessions per week" concept - explicit caller-supplied requirements instead
+
+Per the phase brief's explicit stop condition (its PART 106.4), the repository was checked for any existing concept of "how many lab sessions does BDA/A1 need per week" - none exists anywhere in the schema, docs, or domain model. Rather than invent one, `AutomaticSchedulingRequest` takes an explicit, caller-supplied `List<SessionRequirement>` - the brief's own preferred resolution for exactly this situation ("a caller may alternatively supply explicit session requirements, which avoids needing a new database concept").
+
+### No production automatic-scheduling API
+
+`AutomaticSchedulingEngine` remains internal, same as every other Phase 10-13 orchestration layer - no `POST /api/scheduling/automatic` or equivalent was added. Verified via unit/integration tests and a temporary dev-profile harness against the live Dockerized stack, never through a production HTTP surface. A future phase can expose a real, carefully-authorized endpoint once the roadmap calls for one.
+
+### Verified end-to-end (Dockerized, 2026-08-24)
+
+A temporary `@Profile("dev")`-only `ApplicationRunner` (`DevAutomaticSchedulingVerificationRunner`, deleted after use, same safe pattern as Phase 9-13's) exercised the real `AutomaticSchedulingEngine` against the real dev-seeded BDA/CNS demo data over live Docker/Postgres, with every temporary mutation cleaned up immediately after its own scenario. All required scenarios matched: BDA/A1 and CNS/A2 scheduled simultaneously at Monday 09:00 in different labs (`C-202`/`B-101`) with zero backtracks; the BDA assignment's lab (`C-202`) genuinely has Cloudera, proving the hard software requirement was never bypassed for solver convenience; a second, temporary `SubjectFacultyAssignment` giving Faculty BDA two simultaneous requirements (A1 and A3) produced two non-overlapping times (09:00 and 14:00), proving the same-faculty conflict was correctly avoided; occupying the BDA-preferred lab (`C-202`) with a real, persisted `Allocation` caused the solver to reschedule BDA to a different, genuinely free Cloudera lab (`B-201`) at the same time, proving persisted occupancy is respected without needing to shift time at all; and the `allocation` table's row count was confirmed identical before and after the full run. Regression re-verified: all Phase 3-13 endpoints still 200; `/api/allocations` still 404 both directions; Flyway still at schema version 10; dev-seeded lab count confirmed 15.
+
+**Real bug found and fixed during this verification** (see docs/15-DESIGN-DECISIONS.md and the Phase 14 completion report for the full account): a provisional `ExistingAllocationSnapshot` built with a `null` allocationId crashed `LabConflictConstraint`/`FacultyConflictConstraint`/`BatchConflictConstraint`/`DivisionWideConflictConstraint` with a `NullPointerException` the instant a real provisional conflict was detected, because each constraint builds its violation-details map with `java.util.Map.of(...)`, which throws on any null value. Fixed by giving `PlannedAllocation.toSnapshot()` a synthetic, always-non-null sentinel allocation id (`-1L`, never colliding with a real positive `BIGINT` identity value) rather than touching any of the four tested Phase 9 constraint classes.

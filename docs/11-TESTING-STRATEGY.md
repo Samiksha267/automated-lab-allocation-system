@@ -285,18 +285,35 @@ Real repository-backed data via `SchedulingContextFactory`/`CandidateAllocationF
 - Lab Assistant can manage CR assignments and accounts; CR cannot.
 - Ended `cr_assignment` immediately loses division-scoped access (no stale-permission caching).
 
-## Algorithm Test Coverage (Phase 10–14)
+## Algorithm Test Coverage (Phase 10–14) — superseded by the phase-specific sections above
 
-**Roadmap correction (Phase 8):** this section's heading previously read "Phase 8–14," a Phase-1-era label never revisited. Phase 8 (docs/03-SYSTEM-ARCHITECTURE.md §16) is now confirmed as the schema/domain-object foundation, not algorithm work — every scenario below (candidate generation, scoring, most-constrained-first, backtracking) is Phase 10 onward.
+**Roadmap correction:** this section originally sketched speculative Phase-1-era scenario names (`ScheduleResult`, "session D/E," a `PARTIAL`-only outcome) before any of Phases 10-14 were implemented. Every one of those scenarios is now real, tested code with a real class name, documented in its own phase-specific section above ("Candidate Generation Tests," "Scoring Engine Tests," "Explainable Allocation Tests," "Conflict Analysis + Alternative Suggestion Tests," "Automatic Scheduling Tests") rather than this one speculative catch-all. Kept here only as a pointer, not duplicated content, per this project's standing practice of correcting rather than silently deleting superseded planning text.
 
-- Candidate generation returns exactly the labs satisfying capacity/software/equipment/type filters — verified against fixture data with known expected sets.
-- Capacity-fit scoring formula matches the documented formula in [07-ALLOCATION-SCORING.md](07-ALLOCATION-SCORING.md) for hand-computed fixture values (e.g. strength 64 vs capacity 65/70/150 produces strictly descending scores).
-- Balanced-utilization scoring favors a less-used lab when all else is equal.
-- Most-constrained-first ordering: a fixture with one rare-software session and several flexible sessions is scheduled with the rare one first (assert ordering directly, not just final outcome).
-- Backtracking: a fixture deliberately constructed so a greedy (non-backtracking) assignment would fail sessions D/E, but backtracking to reassign session C's lab produces a full valid schedule — this specific "greedy fails, backtracking succeeds" case is a named required test (per the phase brief).
-- Impossible-schedule detection: a fixture with more sessions than any assignment can satisfy returns `PARTIAL` with correct `unresolved` list and per-session rejection reasons, not a silent failure or exception.
-- Alternative recommendation: a rejected single request returns alternatives ordered same-time-different-lab → same-lab-different-time → same-day-different-slot, per PART 29's priority order.
-- Explanation output: a selected candidate's `ScoreBreakdown` sums to `totalScore` and every listed factor's explanation string is non-empty.
+## Automatic Scheduling Tests — Implemented (Phase 14)
+
+| Test | Class | What it proves |
+|---|---|---|
+| Zero requirements is `COMPLETE` with empty assignments | `AutomaticSchedulingEngineTest` | Normal, non-exceptional trivial case |
+| One requirement behaves consistently with the single-request pipeline | `AutomaticSchedulingEngineTest` | Phase 14 doesn't diverge from Phase 12's own single-request behavior |
+| Greedy success produces zero unnecessary backtracking | `AutomaticSchedulingEngineTest` | No spurious undo when every first choice already works |
+| **Greedy fails (fixed order) / backtracking recovers and succeeds** — the flagship test | `AutomaticSchedulingEngineTest` | R1(X-or-Y)/R2(X-only), a single shared slot, fixed order via the test-only `useMrv=false` path: `COMPLETE`, `backtracks > 0`, final assignment R1→Y/R2→X |
+| MRV schedules the more-constrained requirement first, avoiding the same backtrack | `AutomaticSchedulingEngineTest` | The identical scenario through the real, MRV-enabled public API: `COMPLETE`, `backtracks == 0` - proves MRV's adaptive ordering, not luck |
+| `SEARCH_LIMIT_REACHED` differs from `NO_SOLUTION` | `AutomaticSchedulingEngineTest` | A tiny `maxNodes` cuts a solvable search short - reported honestly as "we stopped," not "impossible" |
+| A genuinely infeasible request returns `NO_SOLUTION`, not a search-limit result | `AutomaticSchedulingEngineTest` | The search exhausts its budget with room to spare and correctly proves impossibility |
+| Deterministic across repeated runs with identical input | `AutomaticSchedulingEngineTest` | Same assignments, same statistics, every time |
+| Duplicate requirement keys rejected at construction | `AutomaticSchedulingEngineTest` | `AutomaticSchedulingRequest`'s own compact-constructor validation |
+| `startDate` after `endDate` rejected | `AutomaticSchedulingEngineTest` | Same |
+| Too many requirements / date range too large rejected | `AutomaticSchedulingEngineTest` | The configured `AutomaticSchedulingConfiguration` bounds are real, not aspirational |
+| Every generated request preserves the confirmed 2-hour duration | `AutomaticSchedulingEngineTest` | Reuses `SchedulingSlotPolicy.sessionDuration()`, never a second duration source |
+| No assignment falls outside the supplied date range | `AutomaticSchedulingEngineTest` | Bounded slot generation is respected end-to-end |
+| A provisional snapshot's allocation id is never null | `PlannedAllocationTest` | Regression test for the real bug found live in Docker (see "Real Bugs Found" below) |
+| The real (unmocked) `LabConflictConstraint` does not throw against a provisional snapshot | `PlannedAllocationTest` | Proves the fix at the exact integration point that crashed, not just at the data-shape level |
+| Multi-requirement schedule places both when enough labs exist | `AutomaticSchedulingIT` (Testcontainers, environment-blocked here) | Real end-to-end pipeline against real persisted data |
+| A real, persisted allocation is respected, never overwritten | `AutomaticSchedulingIT` | Real occupancy against real data |
+| A1 and A2 can be scheduled simultaneously | `AutomaticSchedulingIT` | The project's signature scenario, proven at the automatic-scheduling layer |
+| Automatic scheduling never changes the allocation row count | `AutomaticSchedulingIT` | Persistence-safety proof against real Postgres |
+
+**Manually verified against the Dockerized stack (2026-08-24), via a temporary `@Profile("dev")`-only `ApplicationRunner` (`DevAutomaticSchedulingVerificationRunner`) deleted after use (no production automatic-scheduling API was added just to test this):** BDA/A1 and CNS/A2 scheduled simultaneously at Monday 09:00 in different labs (`C-202`/`B-101`), zero backtracks; the BDA assignment's lab genuinely has Cloudera; a temporary second `SubjectFacultyAssignment` giving Faculty BDA two simultaneous requirements produced two non-overlapping times (09:00 and 14:00); occupying the BDA-preferred lab with a real persisted allocation caused a reschedule to a different, genuinely free Cloudera lab at the same time; and the `allocation` row count was confirmed identical before and after. All temporary mutations (the extra assignment, the persisted test allocation) were cleaned up immediately after their own scenario. Regression re-verified: all Phase 3-13 endpoints still `200`; `/api/allocations` still `404` both directions; Flyway still at schema version 10; dev-seeded lab count confirmed 15.
 
 ## Concurrency Test (Phase 16 gate)
 

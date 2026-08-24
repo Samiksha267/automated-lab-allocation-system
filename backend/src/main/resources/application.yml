@@ -71,6 +71,16 @@ app:
     max-lookahead-days: ${SCHEDULING_MAX_LOOKAHEAD_DAYS:3}
     max-alternative-time-slots-searched: ${SCHEDULING_MAX_ALTERNATIVE_TIME_SLOTS_SEARCHED:6}
     max-alternative-suggestions: ${SCHEDULING_MAX_ALTERNATIVE_SUGGESTIONS:3}
+    # The confirmed fixed session duration (PART 11 of the Phase 14 brief) - made an
+    # explicit policy value here since Phase 14's automatic scheduling has no single
+    # original request to derive a duration from, unlike Phase 13's alternative search.
+    session-duration-minutes: ${SCHEDULING_SESSION_DURATION_MINUTES:120}
+    backtracking:
+      # Phase 14 automatic-scheduling search bounds (docs/05-SCHEDULING-ENGINE.md) - a
+      # genuinely bounded DFS/backtracking search, never unbounded recursion (PART 35).
+      max-nodes: ${SCHEDULING_BACKTRACKING_MAX_NODES:2000}
+      max-requirements: ${SCHEDULING_BACKTRACKING_MAX_REQUIREMENTS:20}
+      max-date-range-days: ${SCHEDULING_BACKTRACKING_MAX_DATE_RANGE_DAYS:31}
   jwt:
     # JWT_SECRET must be overridden with a real, randomly-generated secret
     # (see docs/12-DEPLOYMENT-GUIDE.md) outside of local/dev use - the fallback

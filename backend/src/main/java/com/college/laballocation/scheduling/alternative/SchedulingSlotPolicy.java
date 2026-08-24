@@ -1,6 +1,7 @@
 package com.college.laballocation.scheduling.alternative;
 
 import java.time.DayOfWeek;
+import java.time.Duration;
 import java.time.LocalTime;
 import java.util.Arrays;
 import java.util.Set;
@@ -39,6 +40,7 @@ public class SchedulingSlotPolicy {
     private final int maxLookaheadDays;
     private final int maxAlternativeTimeSlotsSearched;
     private final int maxAlternativeSuggestions;
+    private final int sessionDurationMinutes;
 
     public SchedulingSlotPolicy(
             @Value("${app.scheduling.day-start-time}") String dayStartTime,
@@ -47,7 +49,8 @@ public class SchedulingSlotPolicy {
             @Value("${app.scheduling.working-days}") String workingDays,
             @Value("${app.scheduling.max-lookahead-days}") int maxLookaheadDays,
             @Value("${app.scheduling.max-alternative-time-slots-searched}") int maxAlternativeTimeSlotsSearched,
-            @Value("${app.scheduling.max-alternative-suggestions}") int maxAlternativeSuggestions) {
+            @Value("${app.scheduling.max-alternative-suggestions}") int maxAlternativeSuggestions,
+            @Value("${app.scheduling.session-duration-minutes}") int sessionDurationMinutes) {
         this.dayStartTime = LocalTime.parse(dayStartTime);
         this.dayEndTime = LocalTime.parse(dayEndTime);
         this.slotStepMinutes = requirePositive(slotStepMinutes, "slotStepMinutes");
@@ -58,6 +61,7 @@ public class SchedulingSlotPolicy {
         this.maxLookaheadDays = requireNonNegative(maxLookaheadDays, "maxLookaheadDays");
         this.maxAlternativeTimeSlotsSearched = requirePositive(maxAlternativeTimeSlotsSearched, "maxAlternativeTimeSlotsSearched");
         this.maxAlternativeSuggestions = requirePositive(maxAlternativeSuggestions, "maxAlternativeSuggestions");
+        this.sessionDurationMinutes = requirePositive(sessionDurationMinutes, "sessionDurationMinutes");
         if (!this.dayStartTime.isBefore(this.dayEndTime)) {
             throw new IllegalArgumentException("dayStartTime must be before dayEndTime");
         }
@@ -103,5 +107,18 @@ public class SchedulingSlotPolicy {
 
     public int maxAlternativeSuggestions() {
         return maxAlternativeSuggestions;
+    }
+
+    /**
+     * The confirmed fixed session duration (2 hours) as an explicit,
+     * addressable value - Phase 13 derived duration from each individual
+     * request's own start/end instead, since it always had one to preserve;
+     * Phase 14's automatic scheduling has no such request up front and
+     * needs this policy to state the duration directly (PART 11 of the
+     * Phase 14 brief - reusing this same policy, not a second duration
+     * source).
+     */
+    public Duration sessionDuration() {
+        return Duration.ofMinutes(sessionDurationMinutes);
     }
 }
