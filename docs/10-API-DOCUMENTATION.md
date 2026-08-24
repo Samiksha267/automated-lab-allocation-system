@@ -213,6 +213,16 @@ The production CR-facing workflow — see docs/03-SYSTEM-ARCHITECTURE.md §23 fo
 }
 ```
 
+**Book conflict — database-level race (409 `ALLOCATION_CONFLICT`, Phase 16)** — both requests passed application-level revalidation (each saw the resource as free), and PostgreSQL's own exclusion constraint caught the loser at insert time; real, live-verified example (two genuinely concurrent HTTP requests for the same lab from two different divisions):
+```json
+{
+  "code": "ALLOCATION_CONFLICT",
+  "message": "The selected lab is no longer available for the requested time - a concurrent booking was confirmed first. Please search again for current options.",
+  "details": {"reason": "CONCURRENT_ALLOCATION_CONFLICT", "conflictingResource": "lab"}
+}
+```
+Distinguishable from the ordinary application-level conflict above only by shape (`details.reason`/`conflictingResource` vs. `details.violations`) - both are `409 ALLOCATION_CONFLICT`, deliberately not two different error codes (a caller only ever needs to know "this booking did not succeed, try again," per docs/15-DESIGN-DECISIONS.md ADR-073). A database deadlock detected while two simultaneous inserts each check the exclusion constraint against the other's not-yet-committed row (a real, live-observed PostgreSQL behavior, not hypothetical) produces the identical response - never a `500`.
+
 **Cancel request** (`reason` optional):
 ```json
 {"reason": "Faculty unavailable"}

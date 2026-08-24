@@ -16,6 +16,7 @@ import com.college.laballocation.academic.BatchService;
 import com.college.laballocation.academic.CrAssignment;
 import com.college.laballocation.academic.CrOwnershipService;
 import com.college.laballocation.academic.Division;
+import com.college.laballocation.academic.DivisionRepository;
 import com.college.laballocation.academic.Program;
 import com.college.laballocation.academic.Stream;
 import com.college.laballocation.common.ApiException;
@@ -108,6 +109,9 @@ class ExtraLabServiceTest {
     private AllocationRepository allocationRepository;
 
     @Mock
+    private DivisionRepository divisionRepository;
+
+    @Mock
     private BatchService batchService;
 
     @Mock
@@ -145,7 +149,7 @@ class ExtraLabServiceTest {
         service = new ExtraLabService(
                 crOwnershipService, facultyAssignmentResolutionService, alternativeSuggestionService,
                 schedulingContextFactory, candidateAllocationFactory, constraintEngine, scheduleVersionRepository,
-                allocationRepository, batchService, subjectService, facultyService, labService);
+                allocationRepository, divisionRepository, batchService, subjectService, facultyService, labService);
 
         Program program = new Program("EXTRA-PROG", "Extra Lab Test Program", 4);
         Stream stream = new Stream(program, "CS", "CS");
@@ -176,6 +180,7 @@ class ExtraLabServiceTest {
 
     private void stubOwnershipAndFaculty() {
         when(crOwnershipService.getCurrentAssignment(crUser.getId())).thenReturn(Optional.of(assignment));
+        when(divisionRepository.lockById(division.getId())).thenReturn(Optional.of(division));
         SubjectFacultyAssignment sfa = new SubjectFacultyAssignment(subject, faculty, division, batch, term);
         when(facultyAssignmentResolutionService.resolveForBatch(subject.getId(), division.getId(), batch.getId(), term.getId()))
                 .thenReturn(sfa);
@@ -190,7 +195,7 @@ class ExtraLabServiceTest {
         assertThatThrownBy(() -> service.book(crUser.getId(), bookingRequest()))
                 .isInstanceOf(ResourceNotFoundException.class)
                 .hasMessageContaining("No active CR assignment");
-        verify(allocationRepository, never()).save(any());
+        verify(allocationRepository, never()).saveAndFlush(any());
     }
 
     // --- Faculty resolution ---
@@ -208,6 +213,7 @@ class ExtraLabServiceTest {
     @Test
     void divisionTargetResolvesFacultyViaDivisionLevelAssignment() {
         when(crOwnershipService.getCurrentAssignment(crUser.getId())).thenReturn(Optional.of(assignment));
+        when(divisionRepository.lockById(division.getId())).thenReturn(Optional.of(division));
         SubjectFacultyAssignment sfa = new SubjectFacultyAssignment(subject, faculty, division, null, term);
         when(facultyAssignmentResolutionService.resolveForDivision(subject.getId(), division.getId(), term.getId()))
                 .thenReturn(sfa);
@@ -239,7 +245,7 @@ class ExtraLabServiceTest {
                 .isInstanceOf(ApiException.class)
                 .hasMessageContaining("No published schedule");
         verify(constraintEngine, never()).evaluate(any(), any());
-        verify(allocationRepository, never()).save(any());
+        verify(allocationRepository, never()).saveAndFlush(any());
     }
 
     // --- Book-time revalidation ---
@@ -268,7 +274,7 @@ class ExtraLabServiceTest {
                     assertThat(apiEx.getCode()).isEqualTo("ALLOCATION_CONFLICT");
                     assertThat(apiEx.getDetails()).containsKey("violations");
                 });
-        verify(allocationRepository, never()).save(any());
+        verify(allocationRepository, never()).saveAndFlush(any());
     }
 
     // --- Successful booking ---
@@ -290,12 +296,12 @@ class ExtraLabServiceTest {
         when(facultyService.getEntity(faculty.getId())).thenReturn(faculty);
         when(labService.getEntity(lab.getId())).thenReturn(lab);
         when(batchService.getEntity(batch.getId())).thenReturn(batch);
-        when(allocationRepository.save(any(Allocation.class))).thenAnswer(inv -> inv.getArgument(0));
+        when(allocationRepository.saveAndFlush(any(Allocation.class))).thenAnswer(inv -> inv.getArgument(0));
 
         ExtraLabAllocationResponse response = service.book(crUser.getId(), bookingRequest());
 
         ArgumentCaptor<Allocation> captor = ArgumentCaptor.forClass(Allocation.class);
-        verify(allocationRepository).save(captor.capture());
+        verify(allocationRepository).saveAndFlush(captor.capture());
         Allocation saved = captor.getValue();
 
         assertThat(saved.getAllocationType()).isEqualTo(AllocationType.EXTRA);
@@ -309,6 +315,141 @@ class ExtraLabServiceTest {
         assertThat(response.status()).isEqualTo("PUBLISHED");
     }
 
+    @Test
+    void bookAcquiresDivisionLockBeforeConstraintRevalidation() {
+        stubOwnershipAndFaculty();
+        ScheduleVersion version = publishedVersion();
+        when(scheduleVersionRepository.findByAcademicTermIdAndStatus(term.getId(), ScheduleVersionStatus.PUBLISHED))
+                .thenReturn(Optional.of(version));
+        SchedulingContext context = fakeContext();
+        when(schedulingContextFactory.build(any(SchedulingRequest.class))).thenReturn(context);
+        CandidateAllocation candidate = new CandidateAllocation(context, null);
+        when(candidateAllocationFactory.build(context, lab.getId())).thenReturn(candidate);
+        when(constraintEngine.evaluate(context, candidate)).thenReturn(ConstraintEvaluation.of(List.of()));
+        when(subjectService.getEntity(subject.getId())).thenReturn(subject);
+        when(facultyService.getEntity(faculty.getId())).thenReturn(faculty);
+        when(labService.getEntity(lab.getId())).thenReturn(lab);
+        when(batchService.getEntity(batch.getId())).thenReturn(batch);
+        when(allocationRepository.saveAndFlush(any(Allocation.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        service.book(crUser.getId(), bookingRequest());
+
+        org.mockito.InOrder inOrder = org.mockito.Mockito.inOrder(divisionRepository, constraintEngine, allocationRepository);
+        inOrder.verify(divisionRepository).lockById(division.getId());
+        inOrder.verify(constraintEngine).evaluate(context, candidate);
+        inOrder.verify(allocationRepository).saveAndFlush(any(Allocation.class));
+    }
+
+    @Test
+    void bookRejectsWithAllocationConflictWhenExclusionConstraintRejectsTheInsert() {
+        stubOwnershipAndFaculty();
+        ScheduleVersion version = publishedVersion();
+        when(scheduleVersionRepository.findByAcademicTermIdAndStatus(term.getId(), ScheduleVersionStatus.PUBLISHED))
+                .thenReturn(Optional.of(version));
+        SchedulingContext context = fakeContext();
+        when(schedulingContextFactory.build(any(SchedulingRequest.class))).thenReturn(context);
+        CandidateAllocation candidate = new CandidateAllocation(context, null);
+        when(candidateAllocationFactory.build(context, lab.getId())).thenReturn(candidate);
+        when(constraintEngine.evaluate(context, candidate)).thenReturn(ConstraintEvaluation.of(List.of()));
+        when(subjectService.getEntity(subject.getId())).thenReturn(subject);
+        when(facultyService.getEntity(faculty.getId())).thenReturn(faculty);
+        when(labService.getEntity(lab.getId())).thenReturn(lab);
+        when(batchService.getEntity(batch.getId())).thenReturn(batch);
+
+        org.hibernate.exception.ConstraintViolationException hibernateEx = new org.hibernate.exception.ConstraintViolationException(
+                "duplicate key", null, "ex_allocation_lab_overlap");
+        when(allocationRepository.saveAndFlush(any(Allocation.class)))
+                .thenThrow(new org.springframework.dao.DataIntegrityViolationException("insert failed", hibernateEx));
+
+        assertThatThrownBy(() -> service.book(crUser.getId(), bookingRequest()))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> {
+                    ApiException apiEx = (ApiException) ex;
+                    assertThat(apiEx.getCode()).isEqualTo("ALLOCATION_CONFLICT");
+                    assertThat(apiEx.getStatus().value()).isEqualTo(409);
+                    assertThat(apiEx.getDetails()).containsEntry("reason", "CONCURRENT_ALLOCATION_CONFLICT");
+                    assertThat(apiEx.getDetails()).containsEntry("conflictingResource", "lab");
+                });
+    }
+
+    /**
+     * Regression test for a real bug found live in Docker (Phase 16): two
+     * genuinely simultaneous INSERTs whose new rows mutually overlap can make
+     * PostgreSQL's exclusion-constraint check deadlock rather than cleanly
+     * reject the second insert - surfaced as {@code CannotAcquireLockException}
+     * (a {@link org.springframework.dao.ConcurrencyFailureException}), a
+     * completely different Spring DAO branch than {@code DataIntegrityViolationException}.
+     * Both must produce the identical clean 409, never a 500.
+     */
+    @Test
+    void bookMapsADeadlockDuringExclusionCheckToTheSameCleanConflictResponse() {
+        stubOwnershipAndFaculty();
+        ScheduleVersion version = publishedVersion();
+        when(scheduleVersionRepository.findByAcademicTermIdAndStatus(term.getId(), ScheduleVersionStatus.PUBLISHED))
+                .thenReturn(Optional.of(version));
+        SchedulingContext context = fakeContext();
+        when(schedulingContextFactory.build(any(SchedulingRequest.class))).thenReturn(context);
+        CandidateAllocation candidate = new CandidateAllocation(context, null);
+        when(candidateAllocationFactory.build(context, lab.getId())).thenReturn(candidate);
+        when(constraintEngine.evaluate(context, candidate)).thenReturn(ConstraintEvaluation.of(List.of()));
+        when(subjectService.getEntity(subject.getId())).thenReturn(subject);
+        when(facultyService.getEntity(faculty.getId())).thenReturn(faculty);
+        when(labService.getEntity(lab.getId())).thenReturn(lab);
+        when(batchService.getEntity(batch.getId())).thenReturn(batch);
+
+        when(allocationRepository.saveAndFlush(any(Allocation.class)))
+                .thenThrow(new org.springframework.dao.CannotAcquireLockException("deadlock detected"));
+
+        assertThatThrownBy(() -> service.book(crUser.getId(), bookingRequest()))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> {
+                    ApiException apiEx = (ApiException) ex;
+                    assertThat(apiEx.getCode()).isEqualTo("ALLOCATION_CONFLICT");
+                    assertThat(apiEx.getStatus().value()).isEqualTo(409);
+                    assertThat(apiEx.getDetails()).containsEntry("reason", "CONCURRENT_ALLOCATION_CONFLICT");
+                });
+    }
+
+    /**
+     * Regression test for a real bug found live in Docker (Phase 16):
+     * Hibernate's own {@code ConstraintViolationException.getConstraintName()}
+     * reliably returns {@code null} for PostgreSQL EXCLUDE-constraint
+     * violations (its extractor recognizes "duplicate key value violates
+     * unique constraint" but not "conflicting key value violates exclusion
+     * constraint") - the PostgreSQL-native {@code ServerErrorMessage.getConstraint()}
+     * fallback must still resolve the correct resource.
+     */
+    @Test
+    void extractConstraintNameFallsBackToPostgresServerErrorMessage() {
+        stubOwnershipAndFaculty();
+        ScheduleVersion version = publishedVersion();
+        when(scheduleVersionRepository.findByAcademicTermIdAndStatus(term.getId(), ScheduleVersionStatus.PUBLISHED))
+                .thenReturn(Optional.of(version));
+        SchedulingContext context = fakeContext();
+        when(schedulingContextFactory.build(any(SchedulingRequest.class))).thenReturn(context);
+        CandidateAllocation candidate = new CandidateAllocation(context, null);
+        when(candidateAllocationFactory.build(context, lab.getId())).thenReturn(candidate);
+        when(constraintEngine.evaluate(context, candidate)).thenReturn(ConstraintEvaluation.of(List.of()));
+        when(subjectService.getEntity(subject.getId())).thenReturn(subject);
+        when(facultyService.getEntity(faculty.getId())).thenReturn(faculty);
+        when(labService.getEntity(lab.getId())).thenReturn(lab);
+        when(batchService.getEntity(batch.getId())).thenReturn(batch);
+
+        org.postgresql.util.ServerErrorMessage serverError = new org.postgresql.util.ServerErrorMessage(
+                "SERROR\0C23P01\0Mconflicting key value violates exclusion constraint \"ex_allocation_faculty_overlap\"\0"
+                        + "nex_allocation_faculty_overlap\0");
+        org.postgresql.util.PSQLException psqlEx = new org.postgresql.util.PSQLException(serverError);
+        // Hibernate's own extractor finds no constraint name (constructor arg null) - only the PSQLException fallback can resolve it.
+        org.hibernate.exception.ConstraintViolationException hibernateEx =
+                new org.hibernate.exception.ConstraintViolationException("could not execute statement", psqlEx, null);
+        when(allocationRepository.saveAndFlush(any(Allocation.class)))
+                .thenThrow(new org.springframework.dao.DataIntegrityViolationException("insert failed", hibernateEx));
+
+        assertThatThrownBy(() -> service.book(crUser.getId(), bookingRequest()))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> assertThat(((ApiException) ex).getDetails()).containsEntry("conflictingResource", "faculty"));
+    }
+
     // --- Cancellation ---
 
     @Test
@@ -317,7 +458,7 @@ class ExtraLabServiceTest {
                 AllocationType.REGULAR, division, batch, subject, faculty, lab,
                 LocalDate.of(2026, 8, 24), LocalTime.of(9, 0), LocalTime.of(11, 0),
                 AllocationStatus.PUBLISHED, publishedVersion(), crUser);
-        when(allocationRepository.findById(99L)).thenReturn(Optional.of(regular));
+        when(allocationRepository.findByIdForUpdate(99L)).thenReturn(Optional.of(regular));
 
         assertThatThrownBy(() -> service.cancel(crUser.getId(), 99L, new ExtraLabCancelRequest("no longer needed")))
                 .isInstanceOf(ApiException.class)
@@ -331,7 +472,7 @@ class ExtraLabServiceTest {
                 AllocationType.EXTRA, division, batch, subject, faculty, lab,
                 LocalDate.of(2026, 8, 24), LocalTime.of(9, 0), LocalTime.of(11, 0),
                 AllocationStatus.PUBLISHED, publishedVersion(), crUser);
-        when(allocationRepository.findById(42L)).thenReturn(Optional.of(extra));
+        when(allocationRepository.findByIdForUpdate(42L)).thenReturn(Optional.of(extra));
         when(crOwnershipService.requireOwnsDivision(crUser.getId(), division.getId()))
                 .thenThrow(new ForbiddenDivisionAccessException("You are not assigned to division A."));
 
@@ -346,7 +487,7 @@ class ExtraLabServiceTest {
                 AllocationType.EXTRA, division, batch, subject, faculty, lab,
                 LocalDate.of(2026, 8, 24), LocalTime.of(9, 0), LocalTime.of(11, 0),
                 AllocationStatus.PUBLISHED, publishedVersion(), crUser);
-        when(allocationRepository.findById(42L)).thenReturn(Optional.of(extra));
+        when(allocationRepository.findByIdForUpdate(42L)).thenReturn(Optional.of(extra));
         when(crOwnershipService.requireOwnsDivision(crUser.getId(), division.getId())).thenReturn(assignment);
 
         ExtraLabAllocationResponse response = service.cancel(crUser.getId(), 42L, new ExtraLabCancelRequest("   "));
@@ -365,7 +506,7 @@ class ExtraLabServiceTest {
                 LocalDate.of(2026, 8, 24), LocalTime.of(9, 0), LocalTime.of(11, 0),
                 AllocationStatus.PUBLISHED, publishedVersion(), crUser);
         extra.cancel(crUser, "first cancel");
-        when(allocationRepository.findById(42L)).thenReturn(Optional.of(extra));
+        when(allocationRepository.findByIdForUpdate(42L)).thenReturn(Optional.of(extra));
         when(crOwnershipService.requireOwnsDivision(crUser.getId(), division.getId())).thenReturn(assignment);
 
         assertThatThrownBy(() -> service.cancel(crUser.getId(), 42L, null))

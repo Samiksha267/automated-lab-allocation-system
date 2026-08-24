@@ -43,6 +43,7 @@ startA < endB   AND   startB < endA
 - **Valid example:** Lab C-301 has BDA 09:00–11:00; candidate CNS in Lab C-302 09:00–11:00 → different lab, no conflict.
 - **Invalid example:** Lab C-301 has BDA 09:00–11:00; candidate CNS also in Lab C-301, 10:00–12:00 → overlaps → rejected.
 - **Error code:** `LAB_CONFLICT`.
+- **Database concurrency counterpart (Phase 16):** `ex_allocation_lab_overlap`, a PostgreSQL `EXCLUDE` constraint on `(lab_id, tsrange(allocation_date+start_time, allocation_date+end_time, '[)'))` scoped to `APPROVED`/`PUBLISHED` rows. This constraint enforces the *identical* rule as this class, at commit time, independent of whether `LabConflictConstraint` was ever correctly evaluated first - it is the final line of defense against two concurrent transactions each seeing this constraint pass and both committing (docs/03-SYSTEM-ARCHITECTURE.md §24, docs/15-DESIGN-DECISIONS.md ADR-073). Never a replacement for this class: `LabConflictConstraint` still runs on every request and is what produces the structured `LAB_CONFLICT` violation a caller sees in the normal, non-racing case.
 
 ## HC-02 — Faculty Conflict — **implemented (Phase 9)**
 
@@ -53,6 +54,7 @@ startA < endB   AND   startB < endA
 - **Valid example:** Faculty "BDA Faculty" teaches A1 09:00–11:00 in C-301; Faculty "CNS Faculty" teaches A2 09:00–11:00 in C-302 → different faculty → no conflict.
 - **Invalid example:** Faculty X teaches A1 09:00–11:00 in C-301 and is also requested for A2 09:00–11:00 in C-302 → same faculty, overlapping, different labs → **still rejected**.
 - **Error code:** `FACULTY_CONFLICT`. Distinct from HC-03 (Faculty Availability) — verified with a dedicated test proving a faculty generally available but already booked passes HC-03 and fails HC-02 for the identical candidate.
+- **Database concurrency counterpart (Phase 16):** `ex_allocation_faculty_overlap`, a PostgreSQL `EXCLUDE` constraint mirroring HC-01's, keyed on `faculty_id` instead of `lab_id` — same rationale, same partial predicate, same final-authority relationship to this class (docs/03-SYSTEM-ARCHITECTURE.md §24).
 
 ## HC-03 — Faculty Availability — **implemented (Phase 9)**
 
@@ -72,6 +74,7 @@ startA < endB   AND   startB < endA
 - **Valid example:** A1 BDA 09:00–11:00 (Lab C-301, Faculty X); A2 CNS 09:00–11:00 (Lab C-302, Faculty Y) → different batches → **valid**, not rejected by HC-04 — verified both by unit test and live against real Docker/Postgres data with the actual seeded demo (BDA/A1/Faculty BDA/B-301 vs. CNS/A2/Faculty CNS/C-202).
 - **Invalid example:** A1 BDA 09:00–11:00; new request A1 CNS 10:00–12:00 → same batch, overlapping → rejected.
 - **Error code:** `BATCH_CONFLICT`.
+- **Database concurrency counterpart (Phase 16):** `ex_allocation_batch_overlap`, a PostgreSQL `EXCLUDE` constraint on `(batch_id, tsrange(...))`, additionally guarded `WHERE batch_id IS NOT NULL` so `DIVISION`-targeted rows (always `NULL` batch_id) never participate — different batches of the same division (A1/A2) can therefore never be rejected by this constraint even under true concurrency, by construction, matching this class's own "different batch = irrelevant" rule exactly (docs/03-SYSTEM-ARCHITECTURE.md §24).
 
 ## HC-05 — Division-Wide Conflict — **implemented (Phase 9)**
 
@@ -84,6 +87,7 @@ startA < endB   AND   startB < endA
 - **Invalid example:** Division A has a division-wide guest lecture 09:00–11:00; a new request for batch A2 at 10:00–11:00 → rejected, whole division is occupied.
 - **Cross-division example (explicit — this is deliberately *not* a conflict):** Division A has a division-wide session 09:00–11:00; Division B (unrelated) has a division-wide session 09:00–11:00 → **valid** — `context.existingDivisionAllocations()` is already scoped to the candidate's own division, so a different division's rows never even appear in the list.
 - **Error code:** `DIVISION_CONFLICT`. The full matrix (§ below) is directly unit-tested, six scenarios.
+- **Database concurrency counterpart (Phase 16) — deliberately NOT an exclusion constraint:** unlike HC-01/02/04, this rule cannot be expressed as one symmetric PostgreSQL `EXCLUDE` constraint — exclusion constraints compare rows pairwise with the *same* operator on both sides, and there is no way to say "these two rows conflict only if at least one is `DIVISION`-typed" without either missing real DIVISION-vs-BATCH conflicts or wrongly rejecting two legitimately-simultaneous `BATCH` rows (A1/A2). Instead, `ExtraLabService.book` acquires a deterministic per-division pessimistic lock (`SELECT ... FOR UPDATE` via `DivisionRepository.lockById`) *before* this constraint runs, serializing every booking transaction for one division through a single lock — which makes this class's own ordinary query-then-check logic race-proof without duplicating any of its logic. See ADR-073, docs/15-DESIGN-DECISIONS.md, for the full investigation of why exclusion alone doesn't work here.
 
 ## HC-06 — Lab Availability (maintenance) — **implemented (Phase 9)**
 

@@ -66,7 +66,14 @@
 		<dependency>
 			<groupId>org.postgresql</groupId>
 			<artifactId>postgresql</artifactId>
-			<scope>runtime</scope>
+			<!-- Widened from the Spring Boot starter default of "runtime" to
+			     "compile" (Phase 16) - ExtraLabService inspects PSQLException's
+			     own structured ServerErrorMessage.getConstraint() field to map a
+			     database-level exclusion-constraint race to a specific conflicting
+			     resource (lab/faculty/batch), which Hibernate's own constraint-name
+			     extractor does not reliably provide for EXCLUDE constraint
+			     violations (see ExtraLabService.extractConstraintName's javadoc for
+			     the real bug this fixes). -->
 		</dependency>
 		<dependency>
 			<groupId>org.springframework.boot</groupId>

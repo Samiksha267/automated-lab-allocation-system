@@ -1,9 +1,12 @@
 package com.college.laballocation.scheduling;
 
+import jakarta.persistence.LockModeType;
 import java.time.LocalDate;
 import java.util.Collection;
 import java.util.List;
+import java.util.Optional;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
@@ -46,6 +49,23 @@ public interface AllocationRepository extends JpaRepository<Allocation, Long> {
      */
     List<Allocation> findByAllocationTypeAndScheduleVersion_AcademicTerm_IdOrderByCreatedAtDesc(
             AllocationType allocationType, Long academicTermId);
+
+    /**
+     * Loads one allocation under a {@code SELECT ... FOR UPDATE} row lock -
+     * Phase 16's double-cancel guard ({@code ExtraLabService.cancel}). Two
+     * simultaneous cancellation requests for the same allocation would
+     * otherwise both observe {@code PUBLISHED} (each in its own transaction,
+     * under default READ COMMITTED) and both successfully apply
+     * {@code Allocation.cancel(...)} in memory, with the second UPDATE
+     * silently overwriting the first's audit fields once the first commits -
+     * this lock instead makes the second request block until the first
+     * commits, then re-read the now-{@code CANCELLED} row and correctly fail
+     * with {@code INVALID_ALLOCATION_TRANSITION}, per {@link Allocation#cancel}'s
+     * own existing idempotency rule (never reinvented here).
+     */
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select a from Allocation a where a.id = :id")
+    Optional<Allocation> findByIdForUpdate(@Param("id") Long id);
 
     /**
      * Bulk scheduled-minutes-per-lab aggregation for {@code LabUtilizationService}

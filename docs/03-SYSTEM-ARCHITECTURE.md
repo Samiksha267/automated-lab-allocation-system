@@ -849,6 +849,22 @@ com.college.laballocation.scheduling.explanation/  ExplainableAllocationService 
 
 Every extension above is a **new overloaded method** alongside the original - every pre-Phase-14 caller (Phase 12/13, every pre-Phase-14 test) uses the original single/two-argument overloads completely unchanged, verified by the full pre-existing test suite (234 tests) passing without any behavioral modification.
 
+No new migration - Phase 14 is entirely transient algorithmic/domain code against the existing Phase 8-13 schema and services, confirmed live: Flyway remained at schema version 10 after this phase's work.
+
+### No stored "sessions per week" concept - explicit caller-supplied requirements instead
+
+Per the phase brief's explicit stop condition (its PART 106.4), the repository was checked for any existing concept of "how many lab sessions does BDA/A1 need per week" - none exists anywhere in the schema, docs, or domain model. Rather than invent one, `AutomaticSchedulingRequest` takes an explicit, caller-supplied `List<SessionRequirement>` - the brief's own preferred resolution for exactly this situation ("a caller may alternatively supply explicit session requirements, which avoids needing a new database concept").
+
+### No production automatic-scheduling API
+
+`AutomaticSchedulingEngine` remains internal, same as every other Phase 10-13 orchestration layer - no `POST /api/scheduling/automatic` or equivalent was added. Verified via unit/integration tests and a temporary dev-profile harness against the live Dockerized stack, never through a production HTTP surface. A future phase can expose a real, carefully-authorized endpoint once the roadmap calls for one.
+
+### Verified end-to-end (Dockerized, 2026-08-24)
+
+A temporary `@Profile("dev")`-only `ApplicationRunner` (`DevAutomaticSchedulingVerificationRunner`, deleted after use, same safe pattern as Phase 9-13's) exercised the real `AutomaticSchedulingEngine` against the real dev-seeded BDA/CNS demo data over live Docker/Postgres, with every temporary mutation cleaned up immediately after its own scenario. All required scenarios matched: BDA/A1 and CNS/A2 scheduled simultaneously at Monday 09:00 in different labs (`C-202`/`B-101`) with zero backtracks; the BDA assignment's lab (`C-202`) genuinely has Cloudera, proving the hard software requirement was never bypassed for solver convenience; a second, temporary `SubjectFacultyAssignment` giving Faculty BDA two simultaneous requirements (A1 and A3) produced two non-overlapping times (09:00 and 14:00), proving the same-faculty conflict was correctly avoided; occupying the BDA-preferred lab (`C-202`) with a real, persisted `Allocation` caused the solver to reschedule BDA to a different, genuinely free Cloudera lab (`B-201`) at the same time, proving persisted occupancy is respected without needing to shift time at all; and the `allocation` table's row count was confirmed identical before and after the full run. Regression re-verified: all Phase 3-13 endpoints still 200; `/api/allocations` still 404 both directions; Flyway still at schema version 10; dev-seeded lab count confirmed 15.
+
+**Real bug found and fixed during this verification** (see docs/15-DESIGN-DECISIONS.md and the Phase 14 completion report for the full account): a provisional `ExistingAllocationSnapshot` built with a `null` allocationId crashed `LabConflictConstraint`/`FacultyConflictConstraint`/`BatchConflictConstraint`/`DivisionWideConflictConstraint` with a `NullPointerException` the instant a real provisional conflict was detected, because each constraint builds its violation-details map with `java.util.Map.of(...)`, which throws on any null value. Fixed by giving `PlannedAllocation.toSnapshot()` a synthetic, always-non-null sentinel allocation id (`-1L`, never colliding with a real positive `BIGINT` identity value) rather than touching any of the four tested Phase 9 constraint classes.
+
 ---
 
 ## 23. Phase 15 — Extra Lab Scheduling / CR Booking Workflow (implemented)
@@ -879,8 +895,8 @@ flowchart TD
 | Level | Guarantee | Guarantee NOT provided |
 |---|---|---|
 | **Search** (`POST /api/allocations/extra/search`) | An advisory snapshot of the scheduling pipeline's real output at read time - real ranking, real rejection reasons, real Phase 13 alternatives. | Nothing is reserved; another request (or this same CR's own later action) can invalidate it before booking. |
-| **Book** (`POST /api/allocations/extra`) | Authoritative, transactional revalidation: the exact selected candidate is re-evaluated through the real `ConstraintEngine` against current data, inside the same transaction as the insert. A stale search result is always caught here. | Does **not** eliminate the race between two *simultaneous* concurrent booking requests for the same lab/time - both could pass revalidation in their own transaction before either commits, depending on isolation level. This is a real, acknowledged gap, not glossed over (docs/15-DESIGN-DECISIONS.md). |
-| **Phase 16 (not yet built)** | Will close exactly that remaining gap with a database-level locking/exclusion mechanism (ADR-010), proven by a real concurrent-request test. | N/A - this is the level that finally makes "double-booking is impossible" a proven, not just likely, property. |
+| **Book** (`POST /api/allocations/extra`) | Authoritative, transactional revalidation: the exact selected candidate is re-evaluated through the real `ConstraintEngine` against current data, inside the same transaction as the insert. A stale search result is always caught here. | Alone, does **not** eliminate the race between two *simultaneous* concurrent booking requests for the same lab/time - both could pass revalidation in their own transaction before either commits, depending on isolation level. Phase 16 (below) closes this. |
+| **Phase 16 (implemented, §24 below)** | PostgreSQL exclusion constraints (lab/faculty/batch) plus a per-division pessimistic lock (DIVISION-vs-BATCH) make the database itself the final concurrency boundary - proven by real, true-parallel HTTP/service requests against live Docker Postgres, not merely reasoned about. | Does not add distributed infrastructure, does not retry deadlocks automatically (a deliberate, documented choice - ADR-073), and the pessimistic lock deliberately *serializes* (not rejects) same-division bookings that don't actually conflict. |
 
 ### New backend additions (Phase 15)
 
@@ -901,18 +917,65 @@ com.college.laballocation.scheduling/          AllocationRepository gained two n
 
 Every column this phase needed (`allocation_type`, `status`, `schedule_version_id`, `created_by`, `cancelled_by`, `cancelled_at`, `cancellation_reason`) was already added by the Phase 8 migration, specifically anticipating this workflow (see `Allocation`'s own class javadoc, written in Phase 8: *"created only once already known valid (either an approved PDF-import entry, Phase 19, or a hard-constraint validated EXTRA booking, Phase 15/16)"*). Flyway remains at schema version 10, confirmed unchanged after this phase.
 
-No new migration - Phase 14 is entirely transient algorithmic/domain code against the existing Phase 8-13 schema and services, confirmed live: Flyway remained at schema version 10 after this phase's work.
+---
 
-### No stored "sessions per week" concept - explicit caller-supplied requirements instead
+## 24. Phase 16 — FCFS / Concurrency Finalization (implemented)
 
-Per the phase brief's explicit stop condition (its PART 106.4), the repository was checked for any existing concept of "how many lab sessions does BDA/A1 need per week" - none exists anywhere in the schema, docs, or domain model. Rather than invent one, `AutomaticSchedulingRequest` takes an explicit, caller-supplied `List<SessionRequirement>` - the brief's own preferred resolution for exactly this situation ("a caller may alternatively supply explicit session requirements, which avoids needing a new database concept").
+Finalizes ADR-010: makes PostgreSQL itself the final, authoritative boundary against two genuinely concurrent bookings both succeeding for the same exclusive resource - closing the one gap Phase 15 explicitly acknowledged and left open.
 
-### No production automatic-scheduling API
+### Pipeline (booking, extended)
 
-`AutomaticSchedulingEngine` remains internal, same as every other Phase 10-13 orchestration layer - no `POST /api/scheduling/automatic` or equivalent was added. Verified via unit/integration tests and a temporary dev-profile harness against the live Dockerized stack, never through a production HTTP surface. A future phase can expose a real, carefully-authorized endpoint once the roadmap calls for one.
+```mermaid
+flowchart TD
+    Req[POST /api/allocations/extra] --> Own[CrOwnershipService - resolve division]
+    Own --> Lock["DivisionRepository.lockById - SELECT ... FOR UPDATE (new, Phase 16)"]
+    Lock --> Ver[ScheduleVersionRepository - resolve PUBLISHED version]
+    Ver --> Ctx[SchedulingContextFactory.build - unchanged]
+    Ctx --> CE[ConstraintEngine.evaluate - unchanged, HC-01..HC-12]
+    CE -->|invalid| Conflict1[409 ALLOCATION_CONFLICT]
+    CE -->|valid| Insert["allocationRepository.saveAndFlush"]
+    Insert -->|DB exclusion constraint or deadlock| Conflict2["409 ALLOCATION_CONFLICT - CONCURRENT_ALLOCATION_CONFLICT"]
+    Insert -->|success| Commit[200 - EXTRA allocation persisted]
+```
+
+Only `book` acquires the division lock and is protected by the exclusion constraints - `search` remains exactly as advisory/read-only as it was in Phase 15 (no locking added there, PART 59 of the phase brief).
+
+### Why two separate mechanisms, not one
+
+| Invariant | Mechanism | Why |
+|---|---|---|
+| HC-01 same lab | PostgreSQL `EXCLUDE` constraint (`ex_allocation_lab_overlap`) | Symmetric, per-row - a clean fit for GiST exclusion |
+| HC-02 same faculty | PostgreSQL `EXCLUDE` constraint (`ex_allocation_faculty_overlap`) | Same reasoning |
+| HC-04 same batch | PostgreSQL `EXCLUDE` constraint (`ex_allocation_batch_overlap`) | Same reasoning; `batch_id IS NOT NULL` guard keeps DIVISION rows out |
+| HC-05 DIVISION-vs-BATCH | Per-division `SELECT ... FOR UPDATE` lock (`DivisionRepository.lockById`), acquired before `ConstraintEngine.evaluate` in `ExtraLabService.book` | Not expressible as one symmetric exclusion constraint without either missing real conflicts or wrongly rejecting A1/A2 - see ADR-073 |
+
+The lock **serializes**, never rejects, concurrent bookings within one division - two different batches (A1/A2) booking simultaneously both still succeed, just one after the other, each re-validating against current data once it holds the lock. This is the documented, accepted trade-off (docs/15-DESIGN-DECISIONS.md ADR-073): reduced parallelism within a division, never a false rejection.
+
+### Database error mapping
+
+`ExtraLabService.book` catches two distinct Spring DAO exception branches around the insert and maps both to the identical `409 ALLOCATION_CONFLICT` response:
+- `DataIntegrityViolationException` - the ordinary case: the second transaction's insert is rejected outright by an exclusion constraint once the first has committed.
+- `ConcurrencyFailureException` (specifically `CannotAcquireLockException`) - a **real bug found live in Docker**: two truly simultaneous inserts whose new rows mutually overlap can make PostgreSQL's own exclusion-constraint check deadlock rather than cleanly reject the second one; PostgreSQL's deadlock detector then aborts one side, which Spring surfaces as a completely different exception hierarchy than a straightforward constraint violation. See docs/14-INTERVIEW-PREPARATION.md and the Phase 16 completion report for the full account.
+
+Neither the raw PostgreSQL error text nor the raw exception is ever returned to the client; the violated constraint's name is extracted from two independent structured sources (Hibernate's `ConstraintViolationException.getConstraintName()`, falling back to PostgreSQL's own `PSQLException.getServerErrorMessage().getConstraint()` - the latter added specifically because Hibernate's own extractor does not recognize PostgreSQL's `EXCLUDE`-constraint error message shape) purely to log which resource lost the race.
+
+### New/changed backend (Phase 16)
+
+```
+backend/src/main/resources/db/migration/V11__enforce_allocation_concurrency.sql   (new)
+com.college.laballocation.academic.DivisionRepository        gained lockById (PESSIMISTIC_WRITE)
+com.college.laballocation.scheduling.AllocationRepository    gained findByIdForUpdate (PESSIMISTIC_WRITE, cancel's double-cancel guard)
+com.college.laballocation.scheduling.extra.ExtraLabService   book() acquires the division lock and catches
+                                                                DataIntegrityViolationException/ConcurrencyFailureException;
+                                                                cancel() loads via findByIdForUpdate
+backend/pom.xml                                               org.postgresql:postgresql widened runtime -> compile
+                                                                (application code inspects PSQLException directly)
+```
+
+### No JVM-only locking, no in-memory queue, no distributed infrastructure
+
+Per the phase brief's explicit constraints: no `synchronized`/`ReentrantLock`/static map (would not survive multiple backend instances or a restart, and is not database-authoritative); no in-memory FCFS queue (same durability problem); no Redis/Kafka/message broker (unjustified complexity for a single-Postgres-instance system that already has a correct, simpler database-native answer). The database remains the sole source of truth for concurrency safety, exactly as ADR-003/ADR-010 always intended.
 
 ### Verified end-to-end (Dockerized, 2026-08-24)
 
-A temporary `@Profile("dev")`-only `ApplicationRunner` (`DevAutomaticSchedulingVerificationRunner`, deleted after use, same safe pattern as Phase 9-13's) exercised the real `AutomaticSchedulingEngine` against the real dev-seeded BDA/CNS demo data over live Docker/Postgres, with every temporary mutation cleaned up immediately after its own scenario. All required scenarios matched: BDA/A1 and CNS/A2 scheduled simultaneously at Monday 09:00 in different labs (`C-202`/`B-101`) with zero backtracks; the BDA assignment's lab (`C-202`) genuinely has Cloudera, proving the hard software requirement was never bypassed for solver convenience; a second, temporary `SubjectFacultyAssignment` giving Faculty BDA two simultaneous requirements (A1 and A3) produced two non-overlapping times (09:00 and 14:00), proving the same-faculty conflict was correctly avoided; occupying the BDA-preferred lab (`C-202`) with a real, persisted `Allocation` caused the solver to reschedule BDA to a different, genuinely free Cloudera lab (`B-201`) at the same time, proving persisted occupancy is respected without needing to shift time at all; and the `allocation` table's row count was confirmed identical before and after the full run. Regression re-verified: all Phase 3-13 endpoints still 200; `/api/allocations` still 404 both directions; Flyway still at schema version 10; dev-seeded lab count confirmed 15.
-
-**Real bug found and fixed during this verification** (see docs/15-DESIGN-DECISIONS.md and the Phase 14 completion report for the full account): a provisional `ExistingAllocationSnapshot` built with a `null` allocationId crashed `LabConflictConstraint`/`FacultyConflictConstraint`/`BatchConflictConstraint`/`DivisionWideConflictConstraint` with a `NullPointerException` the instant a real provisional conflict was detected, because each constraint builds its violation-details map with `java.util.Map.of(...)`, which throws on any null value. Fixed by giving `PlannedAllocation.toSnapshot()` a synthetic, always-non-null sentinel allocation id (`-1L`, never colliding with a real positive `BIGINT` identity value) rather than touching any of the four tested Phase 9 constraint classes.
+Live, true-parallel HTTP races (`curl` requests launched as background processes and `wait`ed together, never sequential) against the real Dockerized stack: same-lab race (cross-division, to bypass the division lock and genuinely exercise the exclusion constraint) - repeated 5 times, always exactly one `200`/one `409`, confirmed hitting both the exclusion-constraint path and the deadlock path across the runs; same-faculty race and same-batch race (both caught via the division lock's serialized app-level revalidation); DIVISION-vs-BATCH race in both launch-order directions - always exactly one winner; A1/A2 concurrent booking - both succeeded; three-way contention on one lab - exactly one success, two conflicts; adjacent intervals - both succeeded; a cancelled allocation freeing its slot for an immediate rebooking; same-CR double-submit - exactly one active row; double-cancel on the same allocation - exactly one lifecycle transition applied, the second cleanly rejected; cancel-vs-book race - always exactly one active row regardless of which won. A final diagnostic query across every scenario's rows confirmed zero lab/faculty/batch overlaps and zero invalid DIVISION/BATCH overlaps. Every temporary fixture (a second division/CR/subjects/faculty created specifically to test cross-division racing) was deleted afterward, confirmed by the dev-seed state matching its exact pre-phase baseline.

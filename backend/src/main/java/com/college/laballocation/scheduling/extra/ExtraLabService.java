@@ -4,6 +4,7 @@ import com.college.laballocation.academic.BatchService;
 import com.college.laballocation.academic.CrAssignment;
 import com.college.laballocation.academic.CrOwnershipService;
 import com.college.laballocation.academic.Division;
+import com.college.laballocation.academic.DivisionRepository;
 import com.college.laballocation.common.ApiException;
 import com.college.laballocation.common.ResourceNotFoundException;
 import com.college.laballocation.faculty.Faculty;
@@ -44,6 +45,12 @@ import java.time.LocalDate;
 import java.time.LocalTime;
 import java.util.List;
 import java.util.Map;
+import org.hibernate.exception.ConstraintViolationException;
+import org.postgresql.util.PSQLException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.dao.ConcurrencyFailureException;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -70,10 +77,23 @@ import org.springframework.transaction.annotation.Transactional;
  * never trusts a prior search result and always re-runs the real
  * {@link ConstraintEngine} against the selected lab, current data, right
  * before persisting (PART 11/12).
+ *
+ * <p><b>Concurrency safety (Phase 16):</b> {@link #book} additionally acquires
+ * a per-division pessimistic lock ({@link DivisionRepository#lockById}) before
+ * revalidating, and the eventual insert is protected by three PostgreSQL
+ * exclusion constraints (lab/faculty/batch, V11 migration) that make the
+ * database - not this service's own logic - the final authority on whether
+ * two genuinely concurrent bookings for the same resource can both commit.
+ * See docs/15-DESIGN-DECISIONS.md ADR-073 for the full rationale and
+ * docs/05-SCHEDULING-ENGINE.md for why constraint revalidation (semantic
+ * correctness) and this concurrency layer (commit-time race safety) are
+ * complementary, not redundant.
  */
 @Service
 @Transactional(readOnly = true)
 public class ExtraLabService {
+
+    private static final Logger log = LoggerFactory.getLogger(ExtraLabService.class);
 
     private final CrOwnershipService crOwnershipService;
     private final FacultyAssignmentResolutionService facultyAssignmentResolutionService;
@@ -83,6 +103,7 @@ public class ExtraLabService {
     private final ConstraintEngine constraintEngine;
     private final ScheduleVersionRepository scheduleVersionRepository;
     private final AllocationRepository allocationRepository;
+    private final DivisionRepository divisionRepository;
     private final BatchService batchService;
     private final SubjectService subjectService;
     private final FacultyService facultyService;
@@ -97,6 +118,7 @@ public class ExtraLabService {
             ConstraintEngine constraintEngine,
             ScheduleVersionRepository scheduleVersionRepository,
             AllocationRepository allocationRepository,
+            DivisionRepository divisionRepository,
             BatchService batchService,
             SubjectService subjectService,
             FacultyService facultyService,
@@ -109,6 +131,7 @@ public class ExtraLabService {
         this.constraintEngine = constraintEngine;
         this.scheduleVersionRepository = scheduleVersionRepository;
         this.allocationRepository = allocationRepository;
+        this.divisionRepository = divisionRepository;
         this.batchService = batchService;
         this.subjectService = subjectService;
         this.facultyService = facultyService;
@@ -138,10 +161,27 @@ public class ExtraLabService {
      * path, only a narrower one: correctness comes from evaluating the exact
      * candidate about to be persisted, not from how many other candidates
      * happen to also be evaluated alongside it.
+     *
+     * <p><b>Concurrency (Phase 16):</b> {@code divisionRepository.lockById}
+     * acquires a {@code SELECT ... FOR UPDATE} lock on the request's division
+     * <i>before</i> constraint revalidation - every other concurrent booking
+     * transaction for the same division blocks here until this transaction
+     * commits or rolls back. This is what makes HC-05's DIVISION-vs-BATCH
+     * revalidation (unchanged, still just a normal query inside
+     * {@code ConstraintEngine.evaluate}) race-proof, since no second
+     * transaction can read "current" allocations for this division while
+     * this one is mid-flight. The insert itself is additionally protected,
+     * independent of this lock, by three PostgreSQL exclusion constraints
+     * (lab/faculty/batch) - see ADR-073.
      */
     @Transactional
     public ExtraLabAllocationResponse book(Long userId, ExtraLabBookingRequest request) {
         CrAssignment assignment = requireCrAssignment(userId);
+        Long divisionId = assignment.getDivision().getId();
+        divisionRepository
+                .lockById(divisionId)
+                .orElseThrow(() -> new ResourceNotFoundException("DIVISION_NOT_FOUND", "Division not found: " + divisionId));
+
         SchedulingRequest schedulingRequest = buildSchedulingRequest(
                 userId, assignment, request.subjectId(), request.targetType(), request.batchId(),
                 request.allocationDate(), request.startTime(), request.endTime());
@@ -175,8 +215,28 @@ public class ExtraLabService {
                         request.allocationDate(), request.startTime(), request.endTime(),
                         AllocationStatus.PUBLISHED, publishedVersion, createdBy);
 
-        Allocation saved = allocationRepository.save(allocation);
-        return ExtraLabAllocationResponse.from(saved);
+        log.debug(
+                "Booking attempt: userId={} divisionId={} labId={} date={} {}-{}",
+                userId, divisionId, request.labId(), request.allocationDate(), request.startTime(), request.endTime());
+        try {
+            Allocation saved = allocationRepository.saveAndFlush(allocation);
+            return ExtraLabAllocationResponse.from(saved);
+        } catch (DataIntegrityViolationException e) {
+            throw allocationConcurrencyConflict(e, "exclusion constraint");
+        } catch (ConcurrencyFailureException e) {
+            // Real bug found live in Docker (Phase 16): two genuinely simultaneous
+            // INSERTs whose new rows mutually overlap (each conflicts with the
+            // OTHER's not-yet-committed row) can make PostgreSQL's own exclusion-
+            // constraint check on BOTH sides wait on each other, which its deadlock
+            // detector then breaks by aborting one - surfaced here as
+            // CannotAcquireLockException (SQLState 40P01), a completely different
+            // Spring DAO exception branch than DataIntegrityViolationException, not
+            // the ordinary "arrives second, sees the row, gets rejected" exclusion
+            // path. The correct response is identical either way: this transaction
+            // lost the race, cleanly and by design - see ExtraLabService class
+            // javadoc/ADR-073 for why no automatic server-side retry is attempted.
+            throw allocationConcurrencyConflict(e, "deadlock");
+        }
     }
 
     /**
@@ -188,11 +248,18 @@ public class ExtraLabService {
      * cancel attempt is rejected by {@link Allocation#cancel} itself
      * (PART 30 - idempotency is the existing Phase 8 lifecycle's decision,
      * not reinvented here).
+     *
+     * <p><b>Concurrency (Phase 16):</b> the allocation is loaded under a row
+     * lock ({@link AllocationRepository#findByIdForUpdate}) so two
+     * simultaneous cancel requests for the same allocation serialize - the
+     * second always re-reads the first's committed result before deciding,
+     * rather than both blindly overwriting the row with their own
+     * independently-decided values. See ADR-073.
      */
     @Transactional
     public ExtraLabAllocationResponse cancel(Long userId, Long allocationId, ExtraLabCancelRequest request) {
         Allocation allocation = allocationRepository
-                .findById(allocationId)
+                .findByIdForUpdate(allocationId)
                 .orElseThrow(() -> new ResourceNotFoundException(
                         "EXTRA_ALLOCATION_NOT_FOUND", "Extra allocation not found: " + allocationId));
         if (allocation.getAllocationType() != AllocationType.EXTRA) {
@@ -286,6 +353,75 @@ public class ExtraLabService {
                 "ALLOCATION_CONFLICT", HttpStatus.CONFLICT,
                 "The selected lab is no longer valid for this request.",
                 Map.of("violations", violations));
+    }
+
+    /**
+     * Maps either shape a lost database-level race can take (V11 migration)
+     * to the same {@code 409 ALLOCATION_CONFLICT} shape {@link #allocationConflict}
+     * already returns for an application-detected conflict - a caller does
+     * not need a different error code to know "this booking did not
+     * succeed," and section PART 57 of the phase brief explicitly cautions
+     * against multiplying external codes without real user value. The raw
+     * PostgreSQL/Hibernate exception is never returned to the client
+     * (PART 20) - only the violated constraint's own stable name (never
+     * parsed from English error text) is inspected, purely to log which
+     * resource lost the race and to name it in {@code details.conflictingResource}.
+     * {@code failureKind} ("exclusion constraint" vs "deadlock") is logged
+     * only - both produce the identical external response, since both mean
+     * exactly the same thing to the caller: try again.
+     */
+    private ApiException allocationConcurrencyConflict(Exception e, String failureKind) {
+        String constraintName = extractConstraintName(e);
+        String resource =
+                switch (constraintName == null ? "" : constraintName) {
+                    case "ex_allocation_lab_overlap" -> "lab";
+                    case "ex_allocation_faculty_overlap" -> "faculty";
+                    case "ex_allocation_batch_overlap" -> "batch";
+                    default -> "resource";
+                };
+        log.warn(
+                "Booking lost a database-level concurrency race on {} (kind={}, constraint={})",
+                resource, failureKind, constraintName);
+        return new ApiException(
+                "ALLOCATION_CONFLICT", HttpStatus.CONFLICT,
+                "The selected lab is no longer available for the requested time - a concurrent booking was "
+                        + "confirmed first. Please search again for current options.",
+                Map.of("reason", "CONCURRENT_ALLOCATION_CONFLICT", "conflictingResource", resource));
+    }
+
+    /**
+     * Walks the exception cause chain for a constraint name - never
+     * regex/string-parses the raw SQL error text. Two independent sources are
+     * checked, in order: Hibernate's own {@link ConstraintViolationException#getConstraintName()}
+     * (works for most constraint-violation shapes), and, as a fallback,
+     * PostgreSQL's own structured {@code ServerErrorMessage.getConstraint()}
+     * field (present on every {@link PSQLException}, populated by the server
+     * itself as a distinct wire-protocol field - not parsed from message
+     * text at all). <b>Real bug found live in Docker (Phase 16):</b>
+     * Hibernate's PostgreSQL dialect extracts a constraint name from
+     * {@code "duplicate key value violates unique constraint \"X\""}-shaped
+     * messages, but this project's exclusion-constraint violations read
+     * {@code "conflicting key value violates exclusion constraint \"X\""} -
+     * a different verb Hibernate's extractor does not recognize, so
+     * {@code getConstraintName()} reliably returned {@code null} for every
+     * genuine exclusion-constraint race caught live. The PostgreSQL-native
+     * fallback resolves it correctly regardless of Hibernate's message-shape
+     * assumptions.
+     */
+    private String extractConstraintName(Throwable ex) {
+        Throwable cause = ex;
+        while (cause != null) {
+            if (cause instanceof ConstraintViolationException cve && cve.getConstraintName() != null) {
+                return cve.getConstraintName();
+            }
+            if (cause instanceof PSQLException psqlEx
+                    && psqlEx.getServerErrorMessage() != null
+                    && psqlEx.getServerErrorMessage().getConstraint() != null) {
+                return psqlEx.getServerErrorMessage().getConstraint();
+            }
+            cause = cause.getCause();
+        }
+        return null;
     }
 
     private String normalizeReason(ExtraLabCancelRequest request) {

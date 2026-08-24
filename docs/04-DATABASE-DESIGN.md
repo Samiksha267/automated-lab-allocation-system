@@ -264,7 +264,31 @@ Real association entities `(subject_id, software_id)` / `(subject_id, equipment_
 - All four are partial indexes `WHERE status IN ('APPROVED', 'PUBLISHED')` since only active allocations occupy resources — this keeps the hot conflict-checking indexes small and fast even as cancelled/rejected history accumulates.
 - `(schedule_version_id)`, `(status)`, `(subject_id)` — general-purpose lookups (e.g. "all allocations in this version," "all cancelled allocations"), not on the per-candidate hot path.
 
-**Concurrency — explicitly deferred, not solved here (ADR-010, Phase 16):** no PostgreSQL exclusion constraint exists yet over `(lab_id, allocation_date, time-range)` — Phase 8 only adds the lookup indexes above; the final FCFS-safe concurrency mechanism (row locking vs. an exclusion constraint via `btree_gist`) remains Phase 16's decision, backed by the concurrent-request integration test in docs/11-TESTING-STRATEGY.md.
+**Concurrency — finalized in Phase 16 (V11 migration, ADR-073):** see §7a below for the full mechanism. Phase 8's lookup indexes above remain the plain read-path indexes the constraint engine's ordinary queries use; the exclusion constraints introduced in Phase 16 are a separate, additional guarantee enforced by PostgreSQL itself at insert time, independent of the application ever running a correct query first.
+
+## 7a. Allocation Concurrency — **implemented (Phase 16, Flyway `V11__enforce_allocation_concurrency.sql`)**
+
+**Problem this closes:** Phase 15's book-time `ConstraintEngine` revalidation is correct against a single request's view of the data at the instant it queries, but two genuinely concurrent transactions can each query, each see the resource as free, and each then insert - the classic write-skew race (T1 validates free, T2 validates free, T1 inserts, T2 inserts; both succeed without database-level protection). This migration makes PostgreSQL itself the final, authoritative boundary for three of the four resource-conflict invariants.
+
+**Extension:** `CREATE EXTENSION IF NOT EXISTS btree_gist;` - supplies GiST operator classes for plain scalar equality (`bigint`) so `lab_id`/`faculty_id`/`batch_id` can be combined with a native GiST range type in one multi-column `EXCLUDE` constraint. Verified live against this project's actual `postgres:16-alpine` Docker image before the migration was written (`SELECT * FROM pg_available_extensions WHERE name='btree_gist'` confirmed version 1.7 available; the configured `POSTGRES_USER` is a superuser in the official Postgres image, so `CREATE EXTENSION` requires no additional privilege grant).
+
+**Range expression:** `tsrange(allocation_date + start_time, allocation_date + end_time, '[)')` - `date + time` yields a naive `TIMESTAMP` (no timezone, matching the columns' own types - a session never crosses a timezone boundary), and the `'[)'` bound flag makes the range half-open, matching `TimeIntervalUtils`/every other time comparison in this project: back-to-back sessions (`09:00-11:00` and `11:00-13:00`) never register as overlapping. Verified with real inserts against this exact expression before the migration was finalized (§ below).
+
+**Three exclusion constraints:**
+
+| Constraint | Columns | Partial predicate | HC counterpart |
+|---|---|---|---|
+| `ex_allocation_lab_overlap` | `lab_id WITH =`, range `WITH &&` | `status IN ('APPROVED','PUBLISHED')` | HC-01 |
+| `ex_allocation_faculty_overlap` | `faculty_id WITH =`, range `WITH &&` | `status IN ('APPROVED','PUBLISHED')` | HC-02 |
+| `ex_allocation_batch_overlap` | `batch_id WITH =`, range `WITH &&` | `status IN ('APPROVED','PUBLISHED') AND batch_id IS NOT NULL` | HC-04 |
+
+Each partial predicate mirrors `AllocationStatus.blocksScheduling()` exactly - a `CANCELLED` row never participates and can never block a new insert for the same resource/time (verified live). `ex_allocation_batch_overlap`'s additional `batch_id IS NOT NULL` guard excludes every `DIVISION`-targeted row (which always carries a `NULL` batch_id, `chk_allocation_target_invariant`) from this constraint entirely - different batches of the same division (e.g. A1 and A2) never share a `batch_id`, so this constraint cannot, by construction, ever reject that legitimate simultaneous case.
+
+**Why HC-05 (DIVISION-vs-BATCH cross-type conflict) has no fourth exclusion constraint:** GiST exclusion constraints compare rows pairwise using the *same* operator applied to both sides - there is no way to express "these two rows conflict only if at least one of them is `DIVISION`-typed" as a single symmetric per-row predicate without either missing real conflicts (a plain `division_id WITH =` exclusion would also reject two different, legitimately-simultaneous `BATCH` rows like A1/A2) or over-rejecting them. This is handled instead by a deterministic per-division pessimistic lock, acquired by `ExtraLabService.book` before revalidation - see ADR-073 in docs/15-DESIGN-DECISIONS.md for the full investigation and rationale.
+
+**Verified directly against real PostgreSQL, before writing the migration file (2026-08-24):** a scratch table with the identical `EXCLUDE USING gist (...) WHERE (...)` shape confirmed - overlapping same-lab inserts rejected (`SQLSTATE 23P01`, `exclusion_violation`); adjacent intervals (`09:00-11:00` then `11:00-13:00`) both accepted; a different date at the identical time-of-day accepted; an overlapping `CANCELLED` row accepted (never blocks); a `NULL batch_id` (simulating two `DIVISION` rows) never triggers the batch constraint at all. All scratch objects dropped after verification.
+
+**Live schema state after migration (2026-08-24):** Flyway version 11 applied; `btree_gist` extension present (`1.7`); all three constraints present with `pg_get_constraintdef` output matching this document exactly - see docs/11-TESTING-STRATEGY.md for the full live concurrency verification this schema was then exercised against.
 
 ### The `LocalDate`/`LocalTime` ↔ `Instant` bridge (`SchedulingTimeMapper`)
 

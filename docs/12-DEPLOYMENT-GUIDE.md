@@ -54,6 +54,14 @@ See `.env.example` at the repository root — copied to `.env` for local use (ne
 
 `postgres-data` (Docker named volume) is mounted at `/var/lib/postgresql/data` — survives `docker compose down` (without `-v`); only removed with an explicit `docker compose down -v` or `docker volume rm`.
 
+## Database Extension Requirement (Phase 16)
+
+Since the `V11__enforce_allocation_concurrency.sql` migration, the deployment PostgreSQL instance must support `CREATE EXTENSION btree_gist` (used by three `EXCLUDE` constraints on `allocation` that enforce lab/faculty/batch overlap protection at the database level — docs/04-DATABASE-DESIGN.md §7a, docs/03-SYSTEM-ARCHITECTURE.md §24). Requirements for any deployment target:
+
+- **PostgreSQL version:** `btree_gist` and `EXCLUDE USING gist` with a `WHERE` partial predicate are supported since PostgreSQL 9.x — no concern for any currently-supported PostgreSQL version. Verified specifically against this project's actual `postgres:16-alpine` (the image used in `docker-compose.yml`).
+- **Privilege:** `CREATE EXTENSION` requires either superuser or a role granted `CREATE` on the extension (`btree_gist` is not marked `trusted` in vanilla PostgreSQL, so a non-superuser role typically cannot install it without an explicit grant). In this project's local Compose setup, the configured `POSTGRES_USER` (`lab_user`) is automatically a superuser, per the official `postgres` Docker image's own initialization behavior — verified live (`SELECT rolsuper FROM pg_roles WHERE rolname=current_user` returned `t`) before the migration was written. **A managed/production PostgreSQL instance where the application's role is not a superuser (common for managed cloud databases) will need `btree_gist` installed by a database administrator with sufficient privilege before this migration can run** — this is a real, documented deployment requirement, not assumed away.
+- **Migration behavior:** `CREATE EXTENSION IF NOT EXISTS btree_gist` is idempotent (safe to re-run); the three `ALTER TABLE ... ADD CONSTRAINT` statements are not idempotent in the Postgres sense but Flyway's own versioned-migration model already guarantees `V11` runs at most once per database, so this is consistent with how every other migration in this project already behaves. No down-migration exists, consistent with this project's convention (no prior migration has one either).
+
 ## Planned Production Deployment
 
 Unchanged from the Phase 1 plan — still explicitly **planned, not implemented**:
