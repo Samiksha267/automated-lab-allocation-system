@@ -33,6 +33,20 @@ public interface AllocationRepository extends JpaRepository<Allocation, Long> {
     List<Allocation> findByDivisionIdAndAllocationDateAndStatusIn(
             Long divisionId, LocalDate allocationDate, Collection<AllocationStatus> statuses);
 
+    /** A CR's own division's EXTRA history (Phase 15, {@code GET /api/allocations/extra/mine}) - active and cancelled alike, newest first. */
+    List<Allocation> findByDivisionIdAndAllocationTypeOrderByCreatedAtDesc(Long divisionId, AllocationType allocationType);
+
+    /**
+     * Lab-Assistant EXTRA activity visibility (Phase 15,
+     * {@code GET /api/allocations/extra/activity}), scoped to one required
+     * term - traverses {@code allocation.scheduleVersion.academicTerm.id}
+     * since {@link Allocation} deliberately carries no redundant
+     * {@code academicTermId} column of its own (see {@link Allocation}'s
+     * class javadoc).
+     */
+    List<Allocation> findByAllocationTypeAndScheduleVersion_AcademicTerm_IdOrderByCreatedAtDesc(
+            AllocationType allocationType, Long academicTermId);
+
     /**
      * Bulk scheduled-minutes-per-lab aggregation for {@code LabUtilizationService}
      * (Phase 11's Balanced Utilization scorer) - one grouped query for every

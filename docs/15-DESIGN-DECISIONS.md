@@ -933,3 +933,71 @@ ADR-style log of significant, hard-to-reverse decisions. Each entry: Context, De
 **Reasons:** Committing a generated schedule safely under concurrent real-world writes is exactly the kind of problem Phase 16's FCFS/concurrency work exists to solve properly (ADR-010) - persisting from Phase 14 now would mean either reinventing that safety net ad hoc or, worse, skipping it. Verified live: `automaticSchedulingNeverChangesAllocationRowCount` (`AutomaticSchedulingIT`) and the manual Docker verification's before/after row-count check both confirm zero persistence across every scenario run.
 
 **Trade-offs:** A caller cannot yet act on a generated schedule through this system - it must be reviewed and committed by some future, still-undesigned workflow. Documented as a known limitation in docs/05-SCHEDULING-ENGINE.md, not silently implied to be "done."
+
+---
+
+## ADR-068: Ownership Fields Omitted From the Request DTO Entirely, Not Merely Validated
+
+**Context:** Phase 15's `ExtraLabSearchRequest`/`ExtraLabBookingRequest` needed a decision about whether `divisionId`/`facultyId`/`academicTermId` belong on the wire at all - a common, tempting pattern is to accept them from the client "for convenience" and then validate them server-side against the resolved ownership.
+
+**Decision:** None of the three fields exist anywhere in either request DTO. `divisionId`/`academicTermId` are resolved exclusively from `CrOwnershipService.getCurrentAssignment(userId)`; `facultyId` exclusively from `FacultyAssignmentResolutionService`. There is no code path in `ExtraLabService` that ever reads any of the three from client input.
+
+**Alternatives:** Accepting the fields and validating them against the resolved assignment (reject on mismatch) - rejected per the phase brief's own explicit guidance ("prefer omitting it entirely if unnecessary"). A validate-on-mismatch design still requires a human reader to trust that every code path actually performs the check; omitting the field entirely makes the trust question structurally moot - there is nothing to forget to validate.
+
+**Reasons:** This is the strongest possible form of "never trust client-supplied ownership" (HC-11's whole reason for existing) - not "trust but verify," but "there is nothing here to trust in the first place." It also simplifies the API surface: a CR client never needs to know or send its own division id to use this workflow at all.
+
+**Trade-offs:** None significant - the resolved division/faculty are still returned in every response (`ExtraLabAllocationResponse`), so a client can display them; it simply never supplies them as input.
+
+---
+
+## ADR-069: Search Reuses the Full Pipeline via One `AlternativeSuggestionService` Call; Booking Revalidates Only the Selected Candidate
+
+**Context:** Search needed to expose ranking/rejection/alternatives (Phase 10-13); booking needed to revalidate a specific, already-chosen lab before persisting. These are architecturally different questions with different natural implementations.
+
+**Decision:** `ExtraLabService.search` makes exactly one call, to `AlternativeSuggestionService.findAlternatives(request)` - which itself already calls `ExplainableAllocationService.recommend` and, when needed, searches alternative times - and maps its result directly to the API response. `ExtraLabService.book` does **not** call `CandidateGenerator` (which would regenerate and re-evaluate all ~15 labs) - it calls `SchedulingContextFactory.build` + `CandidateAllocationFactory.build` + `ConstraintEngine.evaluate` directly for the one selected `labId`.
+
+**Alternatives:** Calling `CandidateGenerator.generate(...)` at book time too, then filtering for the selected lab's `EvaluatedCandidate` - considered and rejected as needless work: generating and evaluating every other lab in the system provides no additional correctness for a request that has already committed to one specific lab. `ConstraintEngine.evaluate(...)` is the same real validity check regardless of how many other candidates happen to be evaluated alongside it in a given caller.
+
+**Reasons:** Search's job (helping a CR choose) and booking's job (confirming a choice is still valid) genuinely need different amounts of the pipeline - reusing the narrowest correct subset for booking is not a shortcut, it's using each existing component for exactly the question it answers, per the phase brief's own instruction ("correctness is more important than premature optimization" - but here, evaluating 15 candidates to answer a question about 1 is not premature optimization, it is simply unnecessary work with zero correctness benefit).
+
+**Trade-offs:** None significant - both paths route through the identical, unmodified `ConstraintEngine`; there is no risk of the two questions being answered by two different validity definitions.
+
+---
+
+## ADR-070: EXTRA Allocations Attach Directly to the Currently `PUBLISHED` Version, Stamped `PUBLISHED` Immediately — Phase 15 Confirms, Does Not Redecide, A-11/§16
+
+**Context:** This decision was already made in Phase 1 (docs/ASSUMPTIONS.md A-11) and reconfirmed in Phase 8's `AllocationType`/`ScheduleVersion` class javadocs, before any code existed to actually exercise it. Phase 15 is the first phase where a real HTTP request reaches this path, so it was re-verified against the real implementation rather than assumed still correct.
+
+**Decision:** `ExtraLabService.book` resolves the term's currently `PUBLISHED` `ScheduleVersion` via `scheduleVersionRepository.findByAcademicTermIdAndStatus(termId, PUBLISHED)`, attaches the new `Allocation` directly to it, and constructs it with `AllocationStatus.PUBLISHED` from the start - never `APPROVED`, never a new `DRAFT` version. If no `PUBLISHED` version exists for the term, booking fails `409 NO_PUBLISHED_SCHEDULE` rather than inventing one.
+
+**Reasons:** Re-verified rather than re-decided: the reasoning from A-11 (fast, FCFS makeup-lab booking would be defeated by waiting for the next official timetable cut) still holds, and nothing discovered during Phase 15's implementation contradicted it - confirmed by reading `Allocation`'s own Phase 8 class javadoc before writing a line of Phase 15 code, exactly as the phase brief's pre-analysis step required.
+
+**Trade-offs:** A `PUBLISHED` `ScheduleVersion` is not fully frozen once published - it can keep accumulating EXTRA rows indefinitely, which must not be mistaken for a bug by a future Phase 18 versioning-history UI (already flagged in A-11 itself). `NO_PUBLISHED_SCHEDULE` is a real, reachable failure mode for a term that has never had a REGULAR timetable published - by design, not an oversight; EXTRA booking is additive to an official timetable, not a substitute for one.
+
+---
+
+## ADR-071: `LAB_ASSISTANT` Is Excluded From EXTRA Booking Creation
+
+**Context:** `LAB_ASSISTANT` retains administrative authority generally (CR management, PDF import approval, publishing), and it would have been technically easy to also authorize it on `POST /api/allocations/extra`/`.../search` "just in case an administrator needs to book on a CR's behalf."
+
+**Decision:** `@PreAuthorize("hasRole('CR')")` on `search`/`book`/`cancel`/`mine`; `LAB_ASSISTANT` receives `403` on all four. Only `GET /api/allocations/extra/activity` (read-only) is `LAB_ASSISTANT`-authorized.
+
+**Alternatives:** Authorizing both `CR` and `LAB_ASSISTANT` on the write endpoints - rejected because no functional requirement in this project's confirmed role story asks for it (the story is explicitly "CR schedules/cancels its class; Lab Assistant adds CRs, approves/imports, views CR activity" - never "Lab Assistant books on a CR's behalf"). Adding it now would be speculative authorization surface with no real use case behind it, exactly the kind of unjustified permission this project's RBAC design otherwise avoids granting by default (see ADR-034's identical reasoning for faculty-availability read access).
+
+**Reasons:** If a genuine future need for administrative EXTRA booking emerges, it is a straightforward, backward-compatible addition (loosening one `@PreAuthorize` annotation) - not a redesign. Keeping the write path CR-only now keeps the authorization model simple and matches the confirmed requirements exactly, rather than a guess at future ones.
+
+**Trade-offs:** None significant, and explicitly reversible without a breaking change.
+
+---
+
+## ADR-072: Concurrency Is Deliberately Deferred to Phase 16 — Not Silently Assumed Solved by Phase 15's Transaction
+
+**Context:** `ExtraLabService.book` already runs inside one `@Transactional` write boundary, re-validates the selected candidate against current data, and only then inserts. It would be easy - and wrong - to describe this as "solving" the concurrent double-booking problem the project's own overview names as a core requirement.
+
+**Decision:** Phase 15's transaction boundary is documented, explicitly and repeatedly (this ADR, docs/03-SYSTEM-ARCHITECTURE.md §23, docs/05-SCHEDULING-ENGINE.md, docs/09-AUTHORIZATION-RBAC.md, docs/11-TESTING-STRATEGY.md's concurrency-test section), as necessary but *not sufficient* for concurrency safety - it eliminates the "stale search result" race (a single request's view of data going stale between search and book) but not the "two simultaneous requests" race (both transactions reading the same not-yet-committed-against state before either commits). No row-level locking, exclusion constraint, or `SERIALIZABLE` isolation was added in this phase.
+
+**Alternatives:** Adding a locking/exclusion mechanism now, ahead of Phase 16 - rejected per the phase brief's explicit instruction ("do NOT implement concurrency protection... do not add a giant locking system in Phase 15"). Silently letting the transaction boundary read as "concurrency-safe" without saying otherwise - rejected as dishonest by this project's own working rules; a real, disabled/documentary concurrency test exists in docs/11-TESTING-STRATEGY.md specifically to make the remaining gap concrete and testable, not just asserted in prose.
+
+**Reasons:** Building the real concurrency-safety mechanism (ADR-010's row-locking-vs-exclusion-constraint decision) deserves its own phase with its own dedicated concurrent-request test proving the guarantee actually holds - conflating it with Phase 15's already-substantial scope would risk delivering an unproven, "probably fine" guarantee dressed up as a real one.
+
+**Trade-offs:** Two CRs racing for the same lab/time within milliseconds of each other could, in the current implementation, both pass their own transaction's revalidation before either commits (isolation-level dependent) - a real, acknowledged, currently-open gap, closed by Phase 16, not before.

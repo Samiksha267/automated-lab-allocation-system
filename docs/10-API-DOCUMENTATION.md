@@ -128,14 +128,103 @@ Actual paths differ from the Phase 1 sketch (flat, resource-per-noun, not nested
 | POST | `/api/labs/{labId}/unavailability` | LAB_ASSISTANT | Create (`endDateTime > startDateTime` required) | `INVALID_UNAVAILABILITY_INTERVAL` |
 | DELETE | `/api/labs/{labId}/unavailability/{unavailabilityId}` | LAB_ASSISTANT | Remove (hard delete — see docs/15-DESIGN-DECISIONS.md) | `LAB_UNAVAILABILITY_NOT_FOUND` |
 
-#### Planned, not yet implemented
-| Endpoint (conceptual) | Depends on |
-|---|---|
-| `GET /api/labs/available?subjectId=&date=&startTime=&endTime=` | Subject requirements (Phase 6), allocation persistence (Phase 8), the constraint engine (Phase 9), candidate generation (Phase 10), scoring (Phase 11), explanation (Phase 12), and conflict/alternative analysis (Phase 13) are all implemented and verified — only this endpoint's own CR-facing orchestration and authorization wiring (Phase 15) remain |
+**Phase 13/14 remain internal, same as Phase 10/11/12** — no `POST /api/scheduling/alternatives` or `POST /api/scheduling/automatic` exists. Both `AlternativeSuggestionService` and `AutomaticSchedulingEngine` were verified via unit/integration tests and a temporary dev-profile harness against the live Dockerized stack, never through a production HTTP surface, and remain that way — Phase 15's endpoints below call `AlternativeSuggestionService` (for search), not `AutomaticSchedulingEngine` (multi-session backtracking is a distinct, still-internal-only capability).
 
-**Phase 13 (Conflict Analysis + Alternative Suggestions) remains internal, same as Phase 10/11/12** — no `POST /api/scheduling/alternatives` or equivalent was added. `AlternativeSuggestionService` was verified via unit/integration tests and a temporary dev-profile harness against the live Dockerized stack, never through a production HTTP surface. Phase 15 is where the real CR-facing endpoint above will actually call into `AlternativeSuggestionService`.
+### Extra Lab Scheduling / CR Booking Workflow — **implemented (Phase 15)**
 
-**Phase 14 (Automatic Scheduling / Multi-Session Backtracking) is likewise internal only** — no `POST /api/scheduling/automatic` or equivalent exists. `AutomaticSchedulingEngine` was verified via unit/integration tests and a temporary dev-profile harness against the live Dockerized stack, never through a production HTTP surface. It produces a proposed, unpersisted schedule only; no endpoint to commit/publish one exists in any phase yet.
+The production CR-facing workflow — see docs/03-SYSTEM-ARCHITECTURE.md §23 for the full pipeline and the search/book/Phase-16 three-level guarantee table. `divisionId`/`facultyId`/`academicTermId` are never accepted in any request body below — all three are resolved server-side.
+
+| Method | Path | Roles | Purpose | Key failure codes |
+|---|---|---|---|---|
+| POST | `/api/allocations/extra/search` | CR | Advisory search — ranked valid labs, rejected labs with reasons, alternative-time suggestions when needed. Persists nothing. | `CR_ASSIGNMENT_NOT_FOUND`, `SUBJECT_FACULTY_ASSIGNMENT_NOT_FOUND`, `VALIDATION_ERROR` |
+| POST | `/api/allocations/extra` | CR | Book a specific lab — fresh, transactional constraint revalidation immediately before persisting | `CR_ASSIGNMENT_NOT_FOUND`, `SUBJECT_FACULTY_ASSIGNMENT_NOT_FOUND`, `NO_PUBLISHED_SCHEDULE`, `ALLOCATION_CONFLICT`, `VALIDATION_ERROR` |
+| POST | `/api/allocations/extra/{allocationId}/cancel` | CR | Cancel an `EXTRA` allocation the caller's division owns — soft cancel, never deletes | `EXTRA_ALLOCATION_NOT_FOUND`, `EXTRA_ALLOCATION_FORBIDDEN`, `FORBIDDEN_DIVISION_ACCESS`, `CR_ASSIGNMENT_NOT_FOUND`, `INVALID_ALLOCATION_TRANSITION` |
+| GET | `/api/allocations/extra/mine` | CR | The caller's own division's `EXTRA` allocations, active and cancelled | `CR_ASSIGNMENT_NOT_FOUND` |
+| GET | `/api/allocations/extra/activity?academicTermId=&divisionId=&status=` | LAB_ASSISTANT | Every `EXTRA` allocation for a term, optionally filtered by division/status | `VALIDATION_ERROR` (missing `academicTermId`) |
+
+**Search request:**
+```json
+{
+  "subjectId": 1,
+  "targetType": "BATCH",
+  "batchId": 1,
+  "allocationDate": "2026-08-24",
+  "startTime": "09:00:00",
+  "endTime": "11:00:00"
+}
+```
+
+**Search response** (real, verified against the live BDA/A1 dev-seed scenario):
+```json
+{
+  "recommendationStatus": "RECOMMENDED",
+  "recommendedLab": {
+    "labId": 9, "labCode": "C-202", "rank": 1, "score": 39.58, "maxScore": 60.0, "normalizedScore": 0.6597,
+    "scoreFactors": [
+      {"factor": "BALANCED_UTILIZATION", "applicability": "APPLIED", "pointsAwarded": 15.0, "maxPoints": 15.0, "explanation": "..."},
+      {"factor": "CAPACITY_FIT", "applicability": "APPLIED", "pointsAwarded": 9.58, "maxPoints": 30.0, "explanation": "..."},
+      {"factor": "PREFERRED_LAB_TYPE", "applicability": "APPLIED", "pointsAwarded": 15.0, "maxPoints": 15.0, "explanation": "..."}
+    ]
+  },
+  "rankedValidLabs": [ "... every valid lab, same shape as recommendedLab ..." ],
+  "rejectedLabs": [
+    {"labId": 10, "labCode": "C-304", "violations": [
+      {"errorCode": "SOFTWARE_MISMATCH", "label": "Required software", "message": "Lab C-304 does not provide required software: CLOUDERA."}
+    ]}
+  ],
+  "summary": ["Satisfies all applicable hard constraints (3 valid candidates evaluated).", "..."],
+  "alternativeStatus": "ALTERNATIVES_NOT_NEEDED",
+  "alternatives": []
+}
+```
+
+**Book request** — identical shape plus `labId` (the CR's chosen candidate from a prior search):
+```json
+{
+  "subjectId": 1, "targetType": "BATCH", "batchId": 1,
+  "allocationDate": "2026-08-24", "startTime": "09:00:00", "endTime": "11:00:00",
+  "labId": 9
+}
+```
+
+**Book response (200):**
+```json
+{
+  "allocationId": 27, "allocationType": "EXTRA", "status": "PUBLISHED", "targetType": "BATCH",
+  "subjectId": 1, "subjectCode": "BDA", "facultyId": 1, "facultyName": "Faculty BDA",
+  "labId": 9, "labCode": "C-202", "divisionId": 1, "divisionCode": "A", "batchId": 1, "batchCode": "A1",
+  "allocationDate": "2026-08-24", "startTime": "09:00:00", "endTime": "11:00:00",
+  "scheduleVersionId": 1, "createdByUserId": 2, "createdAt": "2026-08-24T10:38:57.350329789Z",
+  "cancelledByUserId": null, "cancelledAt": null, "cancellationReason": null
+}
+```
+
+**Book conflict (409 `ALLOCATION_CONFLICT`)** — the selected lab is no longer valid at book time (real, live-verified example: a second CR attempting the exact same lab/time):
+```json
+{
+  "code": "ALLOCATION_CONFLICT",
+  "message": "The selected lab is no longer valid for this request.",
+  "details": {
+    "violations": [
+      {"errorCode": "LAB_CONFLICT", "displayLabel": "Lab conflict", "message": "Lab C-202 already hosts an overlapping allocation (09:00-11:00).",
+       "affectedResourceType": "LAB", "affectedResourceId": "C-202", "details": {"existingAllocationId": 27, "existingStartTime": "09:00", "existingEndTime": "11:00"}}
+    ]
+  }
+}
+```
+
+**Cancel request** (`reason` optional):
+```json
+{"reason": "Faculty unavailable"}
+```
+
+**Cancel response (200)** — same shape as the book response, with `status: "CANCELLED"` and the cancellation audit fields populated:
+```json
+{
+  "allocationId": 27, "status": "CANCELLED", "...": "...",
+  "cancelledByUserId": 2, "cancelledAt": "2026-08-24T10:44:32.988706324Z", "cancellationReason": "Faculty unavailable"
+}
+```
 
 ### Subject Requirements — **implemented (Phase 6)**
 

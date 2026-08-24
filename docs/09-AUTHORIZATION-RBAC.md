@@ -116,7 +116,33 @@ Result: 403 FORBIDDEN_DIVISION_ACCESS
 
 Note the request never even reaches this point by supplying a fake role — CR-A *is* genuinely a CR, and genuinely authenticated. The rejection is entirely about ownership of the specific resource, which is why it's a separate check, not folded into role authorization. This is proven directly in `CrOwnershipServiceTest` (`sameCrCannotClaimDivisionBOnceAssignedToDivisionA`) and end-to-end in `AcademicApiIT`.
 
-**Where ownership is (and isn't) wired up yet:** `GET /api/cr-assignments/me` uses `CrOwnershipService.getCurrentAssignment` to resolve "my division" safely (never an arbitrary `userId` lookup). No scheduling endpoint exists yet to *write* against a division as a CR — that arrives with extra-lab booking (Phase 15) — but the ownership-resolution mechanism itself is built and tested now, specifically so it's ready rather than retrofitted later.
+**Where ownership is wired up (Phase 15):** `GET /api/cr-assignments/me` uses `CrOwnershipService.getCurrentAssignment` to resolve "my division" safely (never an arbitrary `userId` lookup) — unchanged since Phase 4. `POST /api/allocations/extra/search` and `POST /api/allocations/extra` (Phase 15) are the first endpoints that actually *write* against a division as a CR, and both resolve `divisionId` exclusively via this same mechanism — no request body field for it exists at all. `POST /api/allocations/extra/{id}/cancel` re-checks ownership independently via `CrOwnershipService.requireOwnsDivision(userId, allocation.getDivision().getId())`, since the allocation being cancelled could belong to a different CR entirely.
+
+### Phase 15 endpoint matrix
+
+| Endpoint | LAB_ASSISTANT | CR | STUDENT | Unauthenticated |
+|---|---|---|---|---|
+| `POST /api/allocations/extra/search` | 403 | 200 (own division only) | 403 | 401 |
+| `POST /api/allocations/extra` (book) | 403 | 200/409 (own division only) | 403 | 401 |
+| `POST /api/allocations/extra/{id}/cancel` | 403 | 200/403/404/409 (own division's `EXTRA` only) | 403 | 401 |
+| `GET /api/allocations/extra/mine` | 403 | 200 (own division only) | 403 | 401 |
+| `GET /api/allocations/extra/activity` | 200 (all divisions) | 403 | 403 | 401 |
+
+No functional requirement authorizes `LAB_ASSISTANT` to search/book/cancel through this workflow (see docs/15-DESIGN-DECISIONS.md) — administrative scheduling, if ever built, is a deliberately separate concern from the CR-facing FCFS booking flow this phase implements.
+
+**Worked ownership-attack example, verified live in Docker (2026-08-24):** a CR assigned to Division A submits a booking request naming a real `subjectId`/`batchId` that genuinely belongs to Division B (constructed by directly editing the request payload — not something the CR's own UI would ever produce under normal use):
+
+```
+CR-A (CrAssignment -> Division A) submits { subjectId: <Division B's subject>, batchId: <Division B's batch>, ... }
+
+Step 1 - divisionId resolution: ExtraLabService NEVER reads divisionId from the request at all -
+         it is set to Division A (CR-A's real assignment) before any downstream call.
+Step 2 - Faculty resolution: FacultyAssignmentResolutionService.resolveForBatch(subjectId, DIVISION A, batchId, term)
+         finds no subject_faculty_assignment row for (Division B's subject, Division A, ...) - none exists.
+Result: 404 SUBJECT_FACULTY_ASSIGNMENT_NOT_FOUND - rejected before any hard constraint even runs.
+```
+
+If a division-level faculty assignment for that subject happened to also exist in Division A (a contrived, coincidental case), the request would still be rejected one layer later, by HC-12's own "batch belongs to division" sub-check (`INVALID_ACADEMIC_RELATIONSHIP`) during book-time constraint evaluation — the attack has no path to success at any layer. Proven live and by `ExtraLabApiIT.crCannotBookAnotherDivisionsBatchOwnershipAttack` (environment-blocked here, see docs/13-DEVELOPER-SETUP.md, but correctly written).
 
 ## Permission Matrix
 
@@ -160,7 +186,7 @@ Legend: R = Read, C = Create, U = Update, D = Delete/Cancel, A = Approve, P = Pu
 
 - **Authentication:** JWT, issued at login, subject = `userId`, `role` claim carried alongside — *implemented* (see above). `JwtAuthenticationFilter` re-derives the effective role from a fresh database read every request rather than trusting the token's `role` claim as current truth, so a role change takes effect immediately, not at next login.
 - **Coarse-grained (role) authorization:** Spring Security method security (`@PreAuthorize("hasRole('LAB_ASSISTANT')")` etc.) — infrastructure is *implemented* (`@EnableMethodSecurity` in `SecurityConfig`, proven against a test fixture in `RoleAuthorizationTest`); no real role-restricted business endpoint exists to apply it to yet (arrives with the academic/lab domain, Phase 4+).
-- **Fine-grained (ownership) authorization:** a dedicated service-layer step resolves the caller's `cr_assignment` (for CR) and compares it against the resource being acted on — **planned**, arrives with CR assignment (Phase 4+); this cannot be expressed as a static `@PreAuthorize` role check alone since it depends on runtime data (which division this CR currently owns), so it will be implemented as an explicit check inside the relevant application service, with a consistent `FORBIDDEN_DIVISION_ACCESS` error result on failure (HC-11 in [06-CONSTRAINTS.md](06-CONSTRAINTS.md) formalizes this as a scheduling-pipeline constraint too, so a bad request never reaches candidate generation).
+- **Fine-grained (ownership) authorization:** a dedicated service-layer step resolves the caller's `cr_assignment` (for CR) and compares it against the resource being acted on — *implemented* (`CrOwnershipService`, Phase 4; genuinely exercised in production by `ExtraLabService`, Phase 15). This cannot be expressed as a static `@PreAuthorize` role check alone since it depends on runtime data (which division this CR currently owns); it is an explicit check inside the relevant application service, with a consistent `FORBIDDEN_DIVISION_ACCESS`/`CR_ASSIGNMENT_NOT_FOUND` error result on failure (HC-11 in [06-CONSTRAINTS.md](06-CONSTRAINTS.md) formalizes the same check as a scheduling-pipeline constraint too, so a bad request is rejected at two independent layers, not just one).
 - **Never trust client `divisionId`:** as stated above and in HC-11 — this is repeated here because it is the single most important authorization rule in the system and the one most likely to be silently violated by a careless future change (e.g., a new endpoint added without threading the ownership check through).
 
 ## Tests Implemented in Phase 3
@@ -170,10 +196,14 @@ Legend: R = Read, C = Create, U = Update, D = Delete/Cancel, A = Approve, P = Pu
 - `RoleAuthorizationTest` (unit, no DB/web layer): `@PreAuthorize("hasRole('LAB_ASSISTANT')")` fixture — LAB_ASSISTANT role succeeds, CR/STUDENT roles get `AccessDeniedException` (proves 403-shaped denial, not merely "unauthenticated").
 - `AuthenticationIT` (Testcontainers-backed integration — see docs/13-DEVELOPER-SETUP.md for this machine's known Docker/Testcontainers limitation): login success returns a JWT + safe user summary; wrong password and unknown email both return the same generic `401 INVALID_CREDENTIALS`; a deactivated user cannot log in; `GET /api/auth/me` without a token returns `401`; with a valid token returns the safe profile; with a malformed/invalid token returns `401`; a duplicate email insert is rejected by the **database** unique constraint (`DataIntegrityViolationException`), not only application validation.
 
-## Tests To Be Written in Later Phases (see [11-TESTING-STRATEGY.md](11-TESTING-STRATEGY.md))
+## Tests Implemented in Phase 15 (see [11-TESTING-STRATEGY.md](11-TESTING-STRATEGY.md))
 
-- Student cannot call any mutating endpoint (expect `403`).
-- CR can schedule within their own division; cannot schedule for another division even when supplying that division's real ID.
-- CR can cancel their own EXTRA allocation; cannot cancel another division's EXTRA allocation; cannot cancel any REGULAR allocation.
-- Lab Assistant can manage CR assignments; CR cannot.
-- A deactivated/ended `cr_assignment` loses all division-scoped permissions immediately (verified by re-checking authorization on every request, not caching a stale permission at login).
+- Student cannot call any mutating endpoint (expect `403`) — `ExtraLabApiIT.studentIsForbiddenAndUnauthenticatedIsRejected`, verified live.
+- CR can schedule within their own division; cannot schedule for another division even when supplying that division's real ID — `ExtraLabApiIT.crCannotBookAnotherDivisionsBatchOwnershipAttack`, verified live.
+- CR can cancel their own EXTRA allocation; cannot cancel another division's EXTRA allocation; cannot cancel any REGULAR allocation — `ExtraLabServiceTest`/`ExtraLabApiIT` (`cancelRejectsWhenCallerDoesNotOwnAllocationsDivision`, `cancelRejectsRegularAllocationType`).
+- Lab Assistant can manage CR assignments; CR cannot — unchanged since Phase 4 (`CrAssignmentController`).
+- A deactivated/ended `cr_assignment` loses all division-scoped permissions immediately (verified by re-checking authorization on every request, not caching a stale permission at login) — unchanged since Phase 4, still holds for Phase 15's endpoints since every one resolves ownership fresh, per-request.
+
+## Remaining Gap (Phase 16)
+
+FCFS/concurrency-safe commit-time revalidation under *simultaneous* competing requests is not yet proven — Phase 15's booking path is transactionally revalidated against a single request's view of the data, which closes the "stale search" gap but not the true concurrent-race gap. See docs/15-DESIGN-DECISIONS.md's Phase 15/16 boundary ADR and docs/03-SYSTEM-ARCHITECTURE.md §23.

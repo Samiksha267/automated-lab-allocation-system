@@ -849,6 +849,58 @@ com.college.laballocation.scheduling.explanation/  ExplainableAllocationService 
 
 Every extension above is a **new overloaded method** alongside the original - every pre-Phase-14 caller (Phase 12/13, every pre-Phase-14 test) uses the original single/two-argument overloads completely unchanged, verified by the full pre-existing test suite (234 tests) passing without any behavioral modification.
 
+---
+
+## 23. Phase 15 — Extra Lab Scheduling / CR Booking Workflow (implemented)
+
+The first production workflow that actually persists an `Allocation` row from a live HTTP request - every phase before this one either validated/scored/explained/searched in memory (Phase 9-13) or explicitly never persisted by design (Phase 14).
+
+### Production flow
+
+```mermaid
+flowchart TD
+    Client["CR client (search then book)"] --> Controller[ExtraLabController]
+    Controller --> Service[ExtraLabService]
+    Service --> Ownership["CrOwnershipService - resolves division/term from the authenticated user, never the request"]
+    Service --> Faculty["FacultyAssignmentResolutionService - resolves facultyId, never client-supplied"]
+    Service -->|search| Alt["AlternativeSuggestionService.findAlternatives (Phase 13, unmodified)"]
+    Alt --> Explain["ExplainableAllocationService.recommend (Phase 12)"]
+    Explain --> CG["CandidateGenerator (Phase 10)"]
+    Service -->|book| Version["ScheduleVersionRepository - resolves the term's currently PUBLISHED version"]
+    Service -->|book| Context["SchedulingContextFactory.build (Phase 8)"]
+    Context --> Candidate["CandidateAllocationFactory.build (Phase 9) - ONE selected lab only"]
+    Candidate --> CE["ConstraintEngine.evaluate (Phase 9, completely unmodified)"]
+    CE -->|valid| Persist["Allocation.forBatch/forDivision(EXTRA, ..., PUBLISHED, version) -> AllocationRepository.save"]
+    CE -->|invalid| Conflict["409 ALLOCATION_CONFLICT with structured violations"]
+```
+
+### Search vs. book vs. Phase 16 - the three-level distinction
+
+| Level | Guarantee | Guarantee NOT provided |
+|---|---|---|
+| **Search** (`POST /api/allocations/extra/search`) | An advisory snapshot of the scheduling pipeline's real output at read time - real ranking, real rejection reasons, real Phase 13 alternatives. | Nothing is reserved; another request (or this same CR's own later action) can invalidate it before booking. |
+| **Book** (`POST /api/allocations/extra`) | Authoritative, transactional revalidation: the exact selected candidate is re-evaluated through the real `ConstraintEngine` against current data, inside the same transaction as the insert. A stale search result is always caught here. | Does **not** eliminate the race between two *simultaneous* concurrent booking requests for the same lab/time - both could pass revalidation in their own transaction before either commits, depending on isolation level. This is a real, acknowledged gap, not glossed over (docs/15-DESIGN-DECISIONS.md). |
+| **Phase 16 (not yet built)** | Will close exactly that remaining gap with a database-level locking/exclusion mechanism (ADR-010), proven by a real concurrent-request test. | N/A - this is the level that finally makes "double-booking is impossible" a proven, not just likely, property. |
+
+### New backend additions (Phase 15)
+
+```
+com.college.laballocation.scheduling.extra/   ExtraLabController (@RestController, /api/allocations/extra)
+                                                ExtraLabService (@Service)
+                                                ExtraLabDtos - ExtraLabSearchRequest/Response, ExtraLabBookingRequest,
+                                                 ExtraLabCancelRequest, ExtraLabAllocationResponse, and their nested
+                                                 candidate/violation/alternative/score-factor view records
+com.college.laballocation.scheduling/          AllocationRepository gained two new derived query methods:
+                                                 findByDivisionIdAndAllocationTypeOrderByCreatedAtDesc (CR "mine")
+                                                 findByAllocationTypeAndScheduleVersion_AcademicTerm_IdOrderByCreatedAtDesc (LA "activity")
+```
+
+`ExtraLabService` contains zero scheduling logic of its own - every hard-constraint check, every score, every alternative-time suggestion is produced by calling Phase 9-13's already-tested services exactly as they already existed. Its own responsibility is narrow and entirely orchestration: resolve ownership server-side, resolve faculty server-side, call the real pipeline, and - only at book time - revalidate the one selected candidate and persist it correctly.
+
+### No database migration
+
+Every column this phase needed (`allocation_type`, `status`, `schedule_version_id`, `created_by`, `cancelled_by`, `cancelled_at`, `cancellation_reason`) was already added by the Phase 8 migration, specifically anticipating this workflow (see `Allocation`'s own class javadoc, written in Phase 8: *"created only once already known valid (either an approved PDF-import entry, Phase 19, or a hard-constraint validated EXTRA booking, Phase 15/16)"*). Flyway remains at schema version 10, confirmed unchanged after this phase.
+
 No new migration - Phase 14 is entirely transient algorithmic/domain code against the existing Phase 8-13 schema and services, confirmed live: Flyway remained at schema version 10 after this phase's work.
 
 ### No stored "sessions per week" concept - explicit caller-supplied requirements instead
