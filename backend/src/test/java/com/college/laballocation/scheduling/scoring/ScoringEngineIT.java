@@ -292,6 +292,7 @@ class ScoringEngineIT {
         AppUser user = seedUser("it-sc-util@example.edu");
         ScheduleVersion version = scheduleVersionRepository.save(new ScheduleVersion(term, 1, null, user));
         version.publish(user);
+        scheduleVersionRepository.saveAndFlush(version);
         // Load the busy lab with several other days' sessions (different date, so it never conflicts with the request itself).
         for (int day = 1; day <= 5; day++) {
             Allocation load = Allocation.forBatch(

@@ -153,7 +153,7 @@ class AutomaticSchedulingIT {
     private ScheduleVersion seedPublishedVersion(AcademicTerm term, AppUser user) {
         ScheduleVersion version = scheduleVersionRepository.save(new ScheduleVersion(term, 1, null, user));
         version.publish(user);
-        return version;
+        return scheduleVersionRepository.saveAndFlush(version);
     }
 
     /** PART 74/76 - two independent requirements (different subjects/batches/faculty/labs) both get placed. */

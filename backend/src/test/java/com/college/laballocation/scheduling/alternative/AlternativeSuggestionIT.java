@@ -147,7 +147,7 @@ class AlternativeSuggestionIT {
     private ScheduleVersion seedPublishedVersion(AcademicTerm term, AppUser user) {
         ScheduleVersion version = scheduleVersionRepository.save(new ScheduleVersion(term, 1, null, user));
         version.publish(user);
-        return version;
+        return scheduleVersionRepository.saveAndFlush(version);
     }
 
     // 2026-08-24 is a Monday - the fixed reference date used throughout this project's dev seed and tests.

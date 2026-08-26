@@ -226,6 +226,7 @@ class CandidateGeneratorIT {
         AppUser user = seedUser("it-cg-conflict@example.edu");
         ScheduleVersion version = scheduleVersionRepository.save(new ScheduleVersion(term, 1, null, user));
         version.publish(user);
+        scheduleVersionRepository.saveAndFlush(version);
         Lab lab = seedLab("CONFLICT", 70);
 
         Allocation existing = Allocation.forBatch(
@@ -313,6 +314,7 @@ class CandidateGeneratorIT {
         AppUser user = seedUser("it-cg-a1a2@example.edu");
         ScheduleVersion version = scheduleVersionRepository.save(new ScheduleVersion(term, 1, null, user));
         version.publish(user);
+        scheduleVersionRepository.saveAndFlush(version);
         Lab labA1 = seedLab("A1A2-A1LAB", 70);
         Lab labA2 = seedLab("A1A2-A2LAB", 70);
 

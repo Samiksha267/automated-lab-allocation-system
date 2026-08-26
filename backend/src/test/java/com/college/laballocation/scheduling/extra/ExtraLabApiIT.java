@@ -186,6 +186,7 @@ class ExtraLabApiIT {
         AppUser publisher = seedUser(UserRole.LAB_ASSISTANT, "extra-publisher-" + suffix + "@example.edu");
         ScheduleVersion version = scheduleVersionRepository.save(new ScheduleVersion(term, 1, null, publisher));
         version.publish(publisher);
+        scheduleVersionRepository.saveAndFlush(version);
         return new Fixture(division, batch, subject, faculty, term, lab, version);
     }
 

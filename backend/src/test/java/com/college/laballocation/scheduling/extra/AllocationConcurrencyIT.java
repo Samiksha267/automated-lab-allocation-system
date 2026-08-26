@@ -167,6 +167,7 @@ class AllocationConcurrencyIT {
                 new AppUser("conc-publisher-" + suffix + "@example.edu", passwordEncoder.encode("irrelevant-pw1"), UserRole.LAB_ASSISTANT, "Test LA"));
         ScheduleVersion version = scheduleVersionRepository.save(new ScheduleVersion(term, 1, null, publisher));
         version.publish(publisher);
+        scheduleVersionRepository.saveAndFlush(version);
         AppUser crUser = userRepository.save(
                 new AppUser("conc-cr-" + suffix + "@example.edu", passwordEncoder.encode("irrelevant-pw1"), UserRole.CR, "Test CR"));
         crAssignmentRepository.save(new CrAssignment(crUser, division, term, crUser));

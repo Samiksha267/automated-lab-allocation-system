@@ -189,8 +189,17 @@ class AnalyticsApiIT {
     private Allocation seedAllocation(
             Fixture fixture, Lab lab, ScheduleVersion version, AppUser createdBy, AllocationType type, AllocationStatus status,
             LocalDate date, LocalTime start, LocalTime end) {
+        return seedAllocation(fixture, lab, fixture.faculty(), version, createdBy, type, status, date, start, end);
+    }
+
+    // A second, simultaneous allocation in a different lab needs its own faculty - the same person
+    // can't teach two overlapping sessions at once, and the real ex_allocation_faculty_overlap
+    // exclusion constraint correctly rejects that regardless of which lab is involved.
+    private Allocation seedAllocation(
+            Fixture fixture, Lab lab, Faculty faculty, ScheduleVersion version, AppUser createdBy, AllocationType type,
+            AllocationStatus status, LocalDate date, LocalTime start, LocalTime end) {
         Allocation allocation = Allocation.forBatch(
-                type, fixture.division(), fixture.batch(), fixture.subject(), fixture.faculty(), lab, date, start, end, status, version, createdBy);
+                type, fixture.division(), fixture.batch(), fixture.subject(), faculty, lab, date, start, end, status, version, createdBy);
         return allocationRepository.saveAndFlush(allocation);
     }
 
@@ -207,7 +216,7 @@ class AnalyticsApiIT {
         seedAllocation(fixture, lab, version, labAssistant, AllocationType.REGULAR, AllocationStatus.CANCELLED, MONDAY, LocalTime.of(14, 0), LocalTime.of(17, 0));
 
         ResponseEntity<String> response = restTemplate.exchange(
-                url("/api/analytics/lab-utilization?academicTermId=" + fixture.term().getId()), HttpMethod.GET,
+                url("/api/analytics/lab-utilization?academicTermId=" + fixture.term().getId() + "&from=" + MONDAY + "&to=" + MONDAY), HttpMethod.GET,
                 new HttpEntity<>(jsonAuth(tokenFor(labAssistant))), String.class);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
@@ -248,10 +257,14 @@ class AnalyticsApiIT {
         v2.publish(labAssistant);
         scheduleVersionRepository.saveAndFlush(v1);
         scheduleVersionRepository.saveAndFlush(v2);
-        seedAllocation(fixture, lab, v2, labAssistant, AllocationType.REGULAR, AllocationStatus.PUBLISHED, MONDAY, LocalTime.of(9, 0), LocalTime.of(10, 0));
+        // A different time slot than v1's allocation - the exclusion constraint scopes to any
+        // active-status allocation regardless of schedule version, so a genuinely overlapping
+        // slot here would correctly be rejected as a real double-booking, not a version-scoping
+        // question this test is about.
+        seedAllocation(fixture, lab, v2, labAssistant, AllocationType.REGULAR, AllocationStatus.PUBLISHED, MONDAY, LocalTime.of(14, 0), LocalTime.of(15, 0));
 
         ResponseEntity<String> response = restTemplate.exchange(
-                url("/api/analytics/lab-utilization?academicTermId=" + fixture.term().getId()), HttpMethod.GET,
+                url("/api/analytics/lab-utilization?academicTermId=" + fixture.term().getId() + "&from=" + MONDAY + "&to=" + MONDAY), HttpMethod.GET,
                 new HttpEntity<>(jsonAuth(tokenFor(labAssistant))), String.class);
 
         // Only V2's 60 minutes count - V1's 120 minutes (SUPERSEDED) must not be included or double-counted.
@@ -265,13 +278,14 @@ class AnalyticsApiIT {
         Lab labB = seedLab("WEIGHTED-B"); // available 120min (after unavailability), booked 120min -> 100%
         AppUser labAssistant = seedUser(UserRole.LAB_ASSISTANT, "an-la-weighted@example.edu");
         ScheduleVersion version = publishedVersion(fixture, labAssistant);
+        Faculty secondFaculty = facultyRepository.save(new Faculty("AN-FAC-WEIGHTED2", "Faculty WEIGHTED2", null, null));
         seedAllocation(fixture, labA, version, labAssistant, AllocationType.REGULAR, AllocationStatus.PUBLISHED, MONDAY, LocalTime.of(9, 0), LocalTime.of(14, 0));
-        seedAllocation(fixture, labB, version, labAssistant, AllocationType.REGULAR, AllocationStatus.PUBLISHED, MONDAY, LocalTime.of(9, 0), LocalTime.of(11, 0));
+        seedAllocation(fixture, labB, secondFaculty, version, labAssistant, AllocationType.REGULAR, AllocationStatus.PUBLISHED, MONDAY, LocalTime.of(9, 0), LocalTime.of(11, 0));
         labUnavailabilityRepository.save(new LabUnavailability(
                 labB, timeMapper.toInstant(MONDAY, LocalTime.of(11, 0)), timeMapper.toInstant(MONDAY, LocalTime.of(19, 0)), "maintenance", labAssistant));
 
         ResponseEntity<String> response = restTemplate.exchange(
-                url("/api/analytics/lab-utilization?academicTermId=" + fixture.term().getId()), HttpMethod.GET,
+                url("/api/analytics/lab-utilization?academicTermId=" + fixture.term().getId() + "&from=" + MONDAY + "&to=" + MONDAY), HttpMethod.GET,
                 new HttpEntity<>(jsonAuth(tokenFor(labAssistant))), String.class);
 
         assertThat(response.getBody())
@@ -310,9 +324,10 @@ class AnalyticsApiIT {
         Lab busyLongLab = seedLab("PEAKLAB-B"); // 1 allocation, 480 minutes total - more load, fewer bookings
         AppUser labAssistant = seedUser(UserRole.LAB_ASSISTANT, "an-la-peaklab@example.edu");
         ScheduleVersion version = publishedVersion(fixture, labAssistant);
+        Faculty secondFaculty = facultyRepository.save(new Faculty("AN-FAC-PEAKLAB2", "Faculty PEAKLAB2", null, null));
         seedAllocation(fixture, busyShortLab, version, labAssistant, AllocationType.REGULAR, AllocationStatus.PUBLISHED, MONDAY, LocalTime.of(9, 0), LocalTime.of(11, 0));
         seedAllocation(fixture, busyShortLab, version, labAssistant, AllocationType.REGULAR, AllocationStatus.PUBLISHED, MONDAY, LocalTime.of(11, 0), LocalTime.of(13, 0));
-        seedAllocation(fixture, busyLongLab, version, labAssistant, AllocationType.REGULAR, AllocationStatus.PUBLISHED, MONDAY, LocalTime.of(9, 0), LocalTime.of(17, 0));
+        seedAllocation(fixture, busyLongLab, secondFaculty, version, labAssistant, AllocationType.REGULAR, AllocationStatus.PUBLISHED, MONDAY, LocalTime.of(9, 0), LocalTime.of(17, 0));
 
         ResponseEntity<String> response = restTemplate.exchange(
                 url("/api/analytics/peak-usage?academicTermId=" + fixture.term().getId()), HttpMethod.GET,
@@ -358,7 +373,7 @@ class AnalyticsApiIT {
                 .contains("\"active\":2")
                 .contains("\"cancelled\":1")
                 .contains("\"failedBookingDataAvailable\":false")
-                .contains("\"groupKey\":\"" + fixture.division().getCode() + "\"");
+                .contains("\"key\":\"" + fixture.division().getCode() + "\"");
     }
 
     @Test
