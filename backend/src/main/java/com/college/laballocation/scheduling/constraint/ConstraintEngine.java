@@ -10,6 +10,7 @@ import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Transactional;
 
 /**
  * Evaluates one {@link CandidateAllocation} against every registered
@@ -57,6 +58,14 @@ public class ConstraintEngine {
                 .toList();
     }
 
+    // At least two constraints (HC-08, HC-09) independently query a repository and then
+    // read a lazy association off the result (e.g. SubjectSoftwareRequirement.getSoftware())
+    // - safe only while one session spans the whole evaluate() call. Every production caller
+    // happens to already run inside its own @Transactional service method, which is why this
+    // was never observed there; a raw, non-transactional caller (as several *IT tests
+    // legitimately are, exercising this engine directly) would otherwise hit
+    // LazyInitializationException the moment such a constraint runs.
+    @Transactional(readOnly = true)
     public ConstraintEvaluation evaluate(SchedulingContext context, CandidateAllocation candidate) {
         List<ConstraintResult> results = new ArrayList<>(constraints.size());
         for (SchedulingConstraint constraint : constraints) {
