@@ -16,6 +16,8 @@ import com.college.laballocation.academic.Stream;
 import com.college.laballocation.academic.StreamRepository;
 import com.college.laballocation.academic.TermStatus;
 import com.college.laballocation.faculty.Faculty;
+import com.college.laballocation.faculty.FacultyAvailability;
+import com.college.laballocation.faculty.FacultyAvailabilityRepository;
 import com.college.laballocation.faculty.FacultyRepository;
 import com.college.laballocation.faculty.SubjectFacultyAssignment;
 import com.college.laballocation.faculty.SubjectFacultyAssignmentRepository;
@@ -44,6 +46,7 @@ import com.college.laballocation.subject.SubjectSoftwareRequirementRepository;
 import com.college.laballocation.user.AppUser;
 import com.college.laballocation.user.UserRepository;
 import com.college.laballocation.user.UserRole;
+import java.time.DayOfWeek;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.util.List;
@@ -93,6 +96,9 @@ class ScoringEngineIT {
 
     @Autowired
     private FacultyRepository facultyRepository;
+
+    @Autowired
+    private FacultyAvailabilityRepository facultyAvailabilityRepository;
 
     @Autowired
     private LabTypeRepository labTypeRepository;
@@ -168,6 +174,7 @@ class ScoringEngineIT {
         Faculty faculty = facultyRepository.save(new Faculty("IT-SC-FAC-CAPFIT", "Faculty CAPFIT", null, null));
         AcademicTerm term = seedTerm("CAPFIT");
         subjectFacultyAssignmentRepository.save(new SubjectFacultyAssignment(subject, faculty, division, batch, term));
+        facultyAvailabilityRepository.save(new FacultyAvailability(faculty, term, DayOfWeek.MONDAY, LocalTime.of(9, 0), LocalTime.of(19, 0)));
         LabType type = seedLabType("CAPFIT");
         Lab tightFit = seedLab("CAPFIT-TIGHT", 70, type);
         Lab looseFit = seedLab("CAPFIT-LOOSE", 150, type);
@@ -197,6 +204,7 @@ class ScoringEngineIT {
         Faculty faculty = facultyRepository.save(new Faculty("IT-SC-FAC-PREFTYPE", "Faculty PREFTYPE", null, null));
         AcademicTerm term = seedTerm("PREFTYP");
         subjectFacultyAssignmentRepository.save(new SubjectFacultyAssignment(subject, faculty, division, batch, term));
+        facultyAvailabilityRepository.save(new FacultyAvailability(faculty, term, DayOfWeek.MONDAY, LocalTime.of(9, 0), LocalTime.of(19, 0)));
         Lab matchingLab = seedLab("PREFTYPE-MATCH", 45, preferredType);
         Lab mismatchedLab = seedLab("PREFTYPE-MISMATCH", 45, otherType);
 
@@ -225,6 +233,7 @@ class ScoringEngineIT {
         Faculty faculty = facultyRepository.save(new Faculty("IT-SC-FAC-HARDSOFT", "Faculty HARDSOFT", null, null));
         AcademicTerm term = seedTerm("HARDSFT");
         subjectFacultyAssignmentRepository.save(new SubjectFacultyAssignment(subject, faculty, division, batch, term));
+        facultyAvailabilityRepository.save(new FacultyAvailability(faculty, term, DayOfWeek.MONDAY, LocalTime.of(9, 0), LocalTime.of(19, 0)));
         // Undersized (40 < required 68) but matches the preferred type - a perfect soft-score candidate that must still be rejected.
         Lab undersizedButPreferred = seedLab("HARDSOFT-SMALL", 40, preferredType);
         Lab validCandidate = seedLab("HARDSOFT-VALID", 70, preferredType);
@@ -251,6 +260,7 @@ class ScoringEngineIT {
         Faculty faculty = facultyRepository.save(new Faculty("IT-SC-FAC-ZEROVALID", "Faculty ZEROVALID", null, null));
         AcademicTerm term = seedTerm("ZEROVAL");
         subjectFacultyAssignmentRepository.save(new SubjectFacultyAssignment(subject, faculty, division, batch, term));
+        facultyAvailabilityRepository.save(new FacultyAvailability(faculty, term, DayOfWeek.MONDAY, LocalTime.of(9, 0), LocalTime.of(19, 0)));
         seedLab("ZEROVALID", 70, seedLabType("ZEROVALID"));
 
         SchedulingRequest request = new SchedulingRequest(
@@ -274,6 +284,7 @@ class ScoringEngineIT {
         Faculty faculty = facultyRepository.save(new Faculty("IT-SC-FAC-UTIL", "Faculty UTIL", null, null));
         AcademicTerm term = seedTerm("UTIL");
         subjectFacultyAssignmentRepository.save(new SubjectFacultyAssignment(subject, faculty, division, batch, term));
+        facultyAvailabilityRepository.save(new FacultyAvailability(faculty, term, DayOfWeek.MONDAY, LocalTime.of(9, 0), LocalTime.of(19, 0)));
         LabType type = seedLabType("UTIL");
         Lab busyLab = seedLab("UTIL-BUSY", 45, type);
         Lab idleLab = seedLab("UTIL-IDLE", 45, type);
@@ -312,6 +323,7 @@ class ScoringEngineIT {
         Faculty faculty = facultyRepository.save(new Faculty("IT-SC-FAC-BDA", "Faculty BDA", null, null));
         AcademicTerm term = seedTerm("BDA");
         subjectFacultyAssignmentRepository.save(new SubjectFacultyAssignment(bda, faculty, division, batch, term));
+        facultyAvailabilityRepository.save(new FacultyAvailability(faculty, term, DayOfWeek.MONDAY, LocalTime.of(9, 0), LocalTime.of(19, 0)));
         LabType type = seedLabType("BDA");
         Software cloudera = softwareRepository.save(new Software("IT-SC-CLOUDERA", "Cloudera"));
         subjectSoftwareRequirementRepository.save(new SubjectSoftwareRequirement(bda, cloudera));

@@ -159,6 +159,7 @@ class AllocationConcurrencyIT {
         AcademicTerm term = academicTermRepository.save(
                 new AcademicTerm("CONC-YR-" + suffix, 1, "Test Term " + suffix, LocalDate.of(2026, 1, 1), LocalDate.of(2026, 6, 30)));
         term.updateStatus(TermStatus.ACTIVE);
+        academicTermRepository.saveAndFlush(term);
         facultyAvailabilityRepository.save(new FacultyAvailability(faculty, term, DayOfWeek.MONDAY, LocalTime.of(9, 0), LocalTime.of(19, 0)));
         LabType labType = labTypeRepository.save(new LabType("CONC-TYPE-" + suffix, "Test Lab Type " + suffix, null));
         Lab lab = labRepository.save(new Lab("CONC-LAB-" + suffix, "Test Lab", 30, labType, "C", "2", "1"));

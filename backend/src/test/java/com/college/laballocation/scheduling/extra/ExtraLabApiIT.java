@@ -178,6 +178,7 @@ class ExtraLabApiIT {
         AcademicTerm term = academicTermRepository.save(
                 new AcademicTerm("EXTRA-YR-" + suffix, 1, "Test Term " + suffix, LocalDate.of(2026, 1, 1), LocalDate.of(2026, 6, 30)));
         term.updateStatus(TermStatus.ACTIVE);
+        academicTermRepository.saveAndFlush(term);
         subjectFacultyAssignmentRepository.save(new SubjectFacultyAssignment(subject, faculty, division, batch, term));
         facultyAvailabilityRepository.save(new FacultyAvailability(faculty, term, DayOfWeek.MONDAY, LocalTime.of(9, 0), LocalTime.of(19, 0)));
         LabType labType = labTypeRepository.save(new LabType("EXTRA-TYPE-" + suffix, "Test Lab Type " + suffix, null));
@@ -291,8 +292,8 @@ class ExtraLabApiIT {
     /** PART 85 - a CR cannot book against another division's batch, even by directly supplying that batch's real id. */
     @Test
     void crCannotBookAnotherDivisionsBatchOwnershipAttack() {
-        Fixture ownFixture = seedFixture("ATTACKOWN", 30);
-        Fixture otherFixture = seedFixture("ATTACKOTHER", 30);
+        Fixture ownFixture = seedFixture("ATCKOWN", 30);
+        Fixture otherFixture = seedFixture("ATCKOTH", 30);
         AppUser crUser = seedUser(UserRole.CR, "extra-cr-attack@example.edu");
         crAssignmentRepository.save(new CrAssignment(crUser, ownFixture.division(), ownFixture.term(), crUser));
         String crToken = tokenFor(crUser);
@@ -397,7 +398,7 @@ class ExtraLabApiIT {
     /** PART 88 - Lab Assistant can see CR EXTRA activity for a term; CR/student cannot reach the administrative activity endpoint. */
     @Test
     void labAssistantSeesExtraActivityCrAndStudentCannot() {
-        Fixture fixture = seedFixture("ACTIVITY", 30);
+        Fixture fixture = seedFixture("ACTIVIT", 30);
         AppUser crUser = seedUser(UserRole.CR, "extra-cr-activity@example.edu");
         crAssignmentRepository.save(new CrAssignment(crUser, fixture.division(), fixture.term(), crUser));
         String crToken = tokenFor(crUser);

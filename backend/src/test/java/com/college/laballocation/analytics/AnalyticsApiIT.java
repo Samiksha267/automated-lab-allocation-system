@@ -196,7 +196,7 @@ class AnalyticsApiIT {
 
     @Test
     void utilizationCountsRealAllocationDurationAndCancelledExclusion() {
-        Fixture fixture = seedFixture("DURATION", MONDAY, MONDAY);
+        Fixture fixture = seedFixture("DURATION", MONDAY, MONDAY.plusDays(1));
         Lab lab = seedLab("DURATION");
         AppUser labAssistant = seedUser(UserRole.LAB_ASSISTANT, "an-la-duration@example.edu");
         ScheduleVersion version = publishedVersion(fixture, labAssistant);
@@ -220,7 +220,7 @@ class AnalyticsApiIT {
 
     @Test
     void operationalAnalyticsExcludeDraftVersionAllocations() {
-        Fixture fixture = seedFixture("DRAFT", MONDAY, MONDAY);
+        Fixture fixture = seedFixture("DRAFT", MONDAY, MONDAY.plusDays(1));
         Lab lab = seedLab("DRAFT");
         AppUser labAssistant = seedUser(UserRole.LAB_ASSISTANT, "an-la-draft@example.edu");
         ScheduleVersion published = publishedVersion(fixture, labAssistant);
@@ -237,7 +237,7 @@ class AnalyticsApiIT {
 
     @Test
     void operationalAnalyticsExcludeSupersededVersionAllocationsAndDoNotDoubleCount() {
-        Fixture fixture = seedFixture("SUPERSEDE", MONDAY, MONDAY);
+        Fixture fixture = seedFixture("SUPERSEDE", MONDAY, MONDAY.plusDays(1));
         Lab lab = seedLab("SUPERSEDE");
         AppUser labAssistant = seedUser(UserRole.LAB_ASSISTANT, "an-la-supersede@example.edu");
         ScheduleVersion v1 = publishedVersion(fixture, labAssistant);
@@ -260,7 +260,7 @@ class AnalyticsApiIT {
 
     @Test
     void weightedOverallUtilizationIsNotANaiveAverageOfPerLabPercentages() {
-        Fixture fixture = seedFixture("WEIGHTED", MONDAY, MONDAY);
+        Fixture fixture = seedFixture("WEIGHTED", MONDAY, MONDAY.plusDays(1));
         Lab labA = seedLab("WEIGHTED-A"); // available 600min, booked 300min -> 50%
         Lab labB = seedLab("WEIGHTED-B"); // available 120min (after unavailability), booked 120min -> 100%
         AppUser labAssistant = seedUser(UserRole.LAB_ASSISTANT, "an-la-weighted@example.edu");
@@ -287,7 +287,7 @@ class AnalyticsApiIT {
 
     @Test
     void unusedLabsListsOnlyLabsWithZeroQualifyingAllocations() {
-        Fixture fixture = seedFixture("UNUSED", MONDAY, MONDAY);
+        Fixture fixture = seedFixture("UNUSED", MONDAY, MONDAY.plusDays(1));
         Lab usedLab = seedLab("UNUSED-USED");
         Lab unusedLab = seedLab("UNUSED-EMPTY");
         AppUser labAssistant = seedUser(UserRole.LAB_ASSISTANT, "an-la-unused@example.edu");
@@ -305,7 +305,7 @@ class AnalyticsApiIT {
 
     @Test
     void mostUsedLabIsRankedByBookedMinutesNotAllocationCount() {
-        Fixture fixture = seedFixture("PEAKLAB", MONDAY, MONDAY);
+        Fixture fixture = seedFixture("PEAKLAB", MONDAY, MONDAY.plusDays(1));
         Lab busyShortLab = seedLab("PEAKLAB-A"); // 2 allocations, 240 minutes total
         Lab busyLongLab = seedLab("PEAKLAB-B"); // 1 allocation, 480 minutes total - more load, fewer bookings
         AppUser labAssistant = seedUser(UserRole.LAB_ASSISTANT, "an-la-peaklab@example.edu");
@@ -339,7 +339,7 @@ class AnalyticsApiIT {
 
     @Test
     void extraLabAnalyticsCountsTotalActiveCancelledAndBreaksDownByDivision() {
-        Fixture fixture = seedFixture("EXTRA", MONDAY, MONDAY);
+        Fixture fixture = seedFixture("EXTRA", MONDAY, MONDAY.plusDays(1));
         Lab lab = seedLab("EXTRA");
         AppUser labAssistant = seedUser(UserRole.LAB_ASSISTANT, "an-la-extra@example.edu");
         ScheduleVersion version = publishedVersion(fixture, labAssistant);
@@ -363,7 +363,7 @@ class AnalyticsApiIT {
 
     @Test
     void conflictAnalyticsHonestlyReportsNoPersistedEvidenceExists() {
-        Fixture fixture = seedFixture("CONFLICT", MONDAY, MONDAY);
+        Fixture fixture = seedFixture("CONFLICT", MONDAY, MONDAY.plusDays(1));
         AppUser labAssistant = seedUser(UserRole.LAB_ASSISTANT, "an-la-conflict@example.edu");
 
         ResponseEntity<String> response = restTemplate.exchange(
@@ -375,7 +375,7 @@ class AnalyticsApiIT {
 
     @Test
     void invalidDateRangeIsRejectedWithAValidationError() {
-        Fixture fixture = seedFixture("BADRANGE", MONDAY, MONDAY);
+        Fixture fixture = seedFixture("BADRANGE", MONDAY, MONDAY.plusDays(1));
         AppUser labAssistant = seedUser(UserRole.LAB_ASSISTANT, "an-la-badrange@example.edu");
 
         ResponseEntity<String> response = restTemplate.exchange(
@@ -388,7 +388,7 @@ class AnalyticsApiIT {
 
     @Test
     void analyticsIsForbiddenToCrAndStudentAndUnauthorizedForAnonymous() {
-        Fixture fixture = seedFixture("RBAC", MONDAY, MONDAY);
+        Fixture fixture = seedFixture("RBAC", MONDAY, MONDAY.plusDays(1));
         AppUser cr = seedUser(UserRole.CR, "an-rbac-cr@example.edu");
         AppUser student = seedUser(UserRole.STUDENT, "an-rbac-student@example.edu");
         String path = "/api/analytics/summary?academicTermId=" + fixture.term().getId();

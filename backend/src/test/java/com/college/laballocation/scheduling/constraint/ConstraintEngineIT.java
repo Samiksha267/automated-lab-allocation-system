@@ -16,6 +16,8 @@ import com.college.laballocation.academic.Stream;
 import com.college.laballocation.academic.StreamRepository;
 import com.college.laballocation.academic.TermStatus;
 import com.college.laballocation.faculty.Faculty;
+import com.college.laballocation.faculty.FacultyAvailability;
+import com.college.laballocation.faculty.FacultyAvailabilityRepository;
 import com.college.laballocation.faculty.FacultyRepository;
 import com.college.laballocation.faculty.SubjectFacultyAssignment;
 import com.college.laballocation.faculty.SubjectFacultyAssignmentRepository;
@@ -47,6 +49,7 @@ import com.college.laballocation.subject.SubjectSoftwareRequirementRepository;
 import com.college.laballocation.user.AppUser;
 import com.college.laballocation.user.UserRepository;
 import com.college.laballocation.user.UserRole;
+import java.time.DayOfWeek;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import org.junit.jupiter.api.Test;
@@ -100,6 +103,9 @@ class ConstraintEngineIT {
 
     @Autowired
     private FacultyRepository facultyRepository;
+
+    @Autowired
+    private FacultyAvailabilityRepository facultyAvailabilityRepository;
 
     @Autowired
     private LabTypeRepository labTypeRepository;
@@ -193,6 +199,8 @@ class ConstraintEngineIT {
 
         subjectFacultyAssignmentRepository.save(new SubjectFacultyAssignment(bda, facultyBda, division, batchA1, term));
         subjectFacultyAssignmentRepository.save(new SubjectFacultyAssignment(cns, facultyCns, division, batchA2, term));
+        facultyAvailabilityRepository.save(new FacultyAvailability(facultyBda, term, DayOfWeek.MONDAY, LocalTime.of(9, 0), LocalTime.of(19, 0)));
+        facultyAvailabilityRepository.save(new FacultyAvailability(facultyCns, term, DayOfWeek.MONDAY, LocalTime.of(9, 0), LocalTime.of(19, 0)));
 
         Allocation a1 = Allocation.forBatch(
                 AllocationType.EXTRA, division, batchA1, bda, facultyBda, labB301,

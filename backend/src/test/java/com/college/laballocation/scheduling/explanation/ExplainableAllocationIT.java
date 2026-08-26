@@ -16,6 +16,8 @@ import com.college.laballocation.academic.Stream;
 import com.college.laballocation.academic.StreamRepository;
 import com.college.laballocation.academic.TermStatus;
 import com.college.laballocation.faculty.Faculty;
+import com.college.laballocation.faculty.FacultyAvailability;
+import com.college.laballocation.faculty.FacultyAvailabilityRepository;
 import com.college.laballocation.faculty.FacultyRepository;
 import com.college.laballocation.faculty.SubjectFacultyAssignment;
 import com.college.laballocation.faculty.SubjectFacultyAssignmentRepository;
@@ -35,6 +37,7 @@ import com.college.laballocation.subject.Subject;
 import com.college.laballocation.subject.SubjectRepository;
 import com.college.laballocation.subject.SubjectSoftwareRequirement;
 import com.college.laballocation.subject.SubjectSoftwareRequirementRepository;
+import java.time.DayOfWeek;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import org.junit.jupiter.api.Test;
@@ -82,6 +85,9 @@ class ExplainableAllocationIT {
 
     @Autowired
     private FacultyRepository facultyRepository;
+
+    @Autowired
+    private FacultyAvailabilityRepository facultyAvailabilityRepository;
 
     @Autowired
     private LabTypeRepository labTypeRepository;
@@ -144,6 +150,7 @@ class ExplainableAllocationIT {
         Faculty faculty = facultyRepository.save(new Faculty("IT-EX-FAC-BDA", "Faculty BDA", null, null));
         AcademicTerm term = seedTerm("BDA");
         subjectFacultyAssignmentRepository.save(new SubjectFacultyAssignment(bda, faculty, division, batch, term));
+        facultyAvailabilityRepository.save(new FacultyAvailability(faculty, term, DayOfWeek.MONDAY, LocalTime.of(9, 0), LocalTime.of(19, 0)));
         Software cloudera = softwareRepository.save(new Software("IT-EX-CLOUDERA", "Cloudera"));
         subjectSoftwareRequirementRepository.save(new SubjectSoftwareRequirement(bda, cloudera));
 
@@ -180,6 +187,7 @@ class ExplainableAllocationIT {
         Faculty faculty = facultyRepository.save(new Faculty("IT-EX-FAC-HS", "Faculty HS", null, null));
         AcademicTerm term = seedTerm("HARDSFT");
         subjectFacultyAssignmentRepository.save(new SubjectFacultyAssignment(subject, faculty, division, batch, term));
+        facultyAvailabilityRepository.save(new FacultyAvailability(faculty, term, DayOfWeek.MONDAY, LocalTime.of(9, 0), LocalTime.of(19, 0)));
         Lab undersizedButPreferred = seedLab("HS-SMALL", 40, preferredType);
         Lab validCandidate = seedLab("HS-VALID", 70, preferredType);
 
@@ -204,6 +212,7 @@ class ExplainableAllocationIT {
         Faculty faculty = facultyRepository.save(new Faculty("IT-EX-FAC-ZERO", "Faculty ZERO", null, null));
         AcademicTerm term = seedTerm("ZERO");
         subjectFacultyAssignmentRepository.save(new SubjectFacultyAssignment(subject, faculty, division, batch, term));
+        facultyAvailabilityRepository.save(new FacultyAvailability(faculty, term, DayOfWeek.MONDAY, LocalTime.of(9, 0), LocalTime.of(19, 0)));
         seedLab("ZERO", 70, seedLabType("ZERO"));
 
         SchedulingRequest request = new SchedulingRequest(
@@ -227,6 +236,7 @@ class ExplainableAllocationIT {
         Faculty faculty = facultyRepository.save(new Faculty("IT-EX-FAC-PERSIST", "Faculty PERSIST", null, null));
         AcademicTerm term = seedTerm("PERSIST");
         subjectFacultyAssignmentRepository.save(new SubjectFacultyAssignment(subject, faculty, division, batch, term));
+        facultyAvailabilityRepository.save(new FacultyAvailability(faculty, term, DayOfWeek.MONDAY, LocalTime.of(9, 0), LocalTime.of(19, 0)));
         seedLab("PERSIST", 45, seedLabType("PERSIST"));
 
         long before = allocationRepository.count();

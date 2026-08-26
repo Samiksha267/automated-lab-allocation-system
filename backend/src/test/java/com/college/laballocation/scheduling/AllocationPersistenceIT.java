@@ -156,12 +156,14 @@ class AllocationPersistenceIT {
         AppUser user = seedUser("it-alloc-sv2@example.edu");
         ScheduleVersion first = scheduleVersionRepository.save(new ScheduleVersion(term, 1, null, user));
         first.publish(user);
-        scheduleVersionRepository.flush();
+        scheduleVersionRepository.saveAndFlush(first);
 
         ScheduleVersion second = scheduleVersionRepository.save(new ScheduleVersion(term, 2, "revision", user));
-        second.publish(user);
 
-        assertThatThrownBy(() -> scheduleVersionRepository.flush()).isInstanceOf(DataIntegrityViolationException.class);
+        assertThatThrownBy(() -> {
+            second.publish(user);
+            scheduleVersionRepository.saveAndFlush(second);
+        }).isInstanceOf(DataIntegrityViolationException.class);
     }
 
     @Test

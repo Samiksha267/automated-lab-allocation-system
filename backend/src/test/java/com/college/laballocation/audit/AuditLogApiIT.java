@@ -181,6 +181,7 @@ class AuditLogApiIT {
         AcademicTerm term = academicTermRepository.save(
                 new AcademicTerm("AUDIT-YR-" + suffix, 1, "Test Term " + suffix, LocalDate.of(2026, 1, 1), LocalDate.of(2026, 6, 30)));
         term.updateStatus(TermStatus.ACTIVE);
+        academicTermRepository.saveAndFlush(term);
         subjectFacultyAssignmentRepository.save(new SubjectFacultyAssignment(subject, faculty, division, batch, term));
         facultyAvailabilityRepository.save(new FacultyAvailability(faculty, term, DayOfWeek.MONDAY, LocalTime.of(9, 0), LocalTime.of(19, 0)));
         LabType labType = labTypeRepository.save(new LabType("AUDIT-TYPE-" + suffix, "Test Lab Type " + suffix, null));
