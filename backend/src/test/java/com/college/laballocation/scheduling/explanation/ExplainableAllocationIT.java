@@ -178,7 +178,7 @@ class ExplainableAllocationIT {
         subject.setLabTypeRequirement(null, preferredType);
         subjectRepository.saveAndFlush(subject);
         Faculty faculty = facultyRepository.save(new Faculty("IT-EX-FAC-HS", "Faculty HS", null, null));
-        AcademicTerm term = seedTerm("HARDSOFT");
+        AcademicTerm term = seedTerm("HARDSFT");
         subjectFacultyAssignmentRepository.save(new SubjectFacultyAssignment(subject, faculty, division, batch, term));
         Lab undersizedButPreferred = seedLab("HS-SMALL", 40, preferredType);
         Lab validCandidate = seedLab("HS-VALID", 70, preferredType);

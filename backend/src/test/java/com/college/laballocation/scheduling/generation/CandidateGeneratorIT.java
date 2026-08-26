@@ -167,7 +167,7 @@ class CandidateGeneratorIT {
         Batch batch = batchRepository.save(new Batch(division, "A1", 30));
         Subject bda = subjectRepository.save(new Subject(year, "IT-CG-BDA", "Big Data Analytics"));
         Faculty faculty = facultyRepository.save(new Faculty("IT-CG-FAC-CL", "Faculty CL", null, null));
-        AcademicTerm term = seedTerm("CLOUDERA");
+        AcademicTerm term = seedTerm("CLOUDER");
         subjectFacultyAssignmentRepository.save(new SubjectFacultyAssignment(bda, faculty, division, batch, term));
 
         Lab labWithCloudera = seedLab("CLOUDERA-YES", 70);
@@ -221,7 +221,7 @@ class CandidateGeneratorIT {
         Batch batch = batchRepository.save(new Batch(division, "A1", 30));
         Subject subject = subjectRepository.save(new Subject(year, "IT-CG-SUB-CONF", "Test Subject"));
         Faculty faculty = facultyRepository.save(new Faculty("IT-CG-FAC-CONF", "Faculty CONF", null, null));
-        AcademicTerm term = seedTerm("CONFLICT");
+        AcademicTerm term = seedTerm("CONFLIC");
         subjectFacultyAssignmentRepository.save(new SubjectFacultyAssignment(subject, faculty, division, batch, term));
         AppUser user = seedUser("it-cg-conflict@example.edu");
         ScheduleVersion version = scheduleVersionRepository.save(new ScheduleVersion(term, 1, null, user));

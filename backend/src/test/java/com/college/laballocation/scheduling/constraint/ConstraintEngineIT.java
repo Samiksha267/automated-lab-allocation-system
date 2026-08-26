@@ -251,7 +251,7 @@ class ConstraintEngineIT {
         Batch batch = batchRepository.save(new Batch(division, "A1", 30));
         Subject bda = subjectRepository.save(new Subject(year, "IT-CE-BDA", "Big Data Analytics"));
         Faculty faculty = facultyRepository.save(new Faculty("IT-CE-FAC-CL", "Faculty CL", null, null));
-        AcademicTerm term = seedTerm("CLOUDERA");
+        AcademicTerm term = seedTerm("CLOUDER");
         AppUser user = seedUser("it-ce-cloudera@example.edu");
         seedPublishedVersion(term, user);
         Lab labWithCloudera = seedLab("CLOUDERA-YES", 70);

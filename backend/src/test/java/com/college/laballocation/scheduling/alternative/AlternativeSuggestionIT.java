@@ -161,7 +161,7 @@ class AlternativeSuggestionIT {
         Batch batch = batchRepository.save(new Batch(division, "A1", 30));
         Subject subject = subjectRepository.save(new Subject(year, "IT-ALT-SUB-LC", "Test Subject"));
         Faculty faculty = facultyRepository.save(new Faculty("IT-ALT-FAC-LC", "Faculty LC", null, null));
-        AcademicTerm term = seedTerm("LABCONF");
+        AcademicTerm term = seedTerm("LABCNF");
         subjectFacultyAssignmentRepository.save(new SubjectFacultyAssignment(subject, faculty, division, batch, term));
         facultyAvailabilityRepository.save(new FacultyAvailability(faculty, term, DayOfWeek.MONDAY, LocalTime.of(9, 0), LocalTime.of(19, 0)));
         AppUser user = seedUser("it-alt-labconf@example.edu");
@@ -194,7 +194,7 @@ class AlternativeSuggestionIT {
         Batch batch = batchRepository.save(new Batch(division, "A1", 30));
         Subject subject = subjectRepository.save(new Subject(year, "IT-ALT-SUB-BC", "Test Subject"));
         Faculty faculty = facultyRepository.save(new Faculty("IT-ALT-FAC-BC", "Faculty BC", null, null));
-        AcademicTerm term = seedTerm("BATCHCONF");
+        AcademicTerm term = seedTerm("BATCHC");
         subjectFacultyAssignmentRepository.save(new SubjectFacultyAssignment(subject, faculty, division, batch, term));
         facultyAvailabilityRepository.save(new FacultyAvailability(faculty, term, DayOfWeek.MONDAY, LocalTime.of(9, 0), LocalTime.of(19, 0)));
         AppUser user = seedUser("it-alt-batchconf@example.edu");
@@ -235,7 +235,7 @@ class AlternativeSuggestionIT {
         Batch batch = batchRepository.save(new Batch(division, "A1", 30));
         Subject subject = subjectRepository.save(new Subject(year, "IT-ALT-SUB-FA", "Test Subject"));
         Faculty faculty = facultyRepository.save(new Faculty("IT-ALT-FAC-FA", "Faculty FA", null, null));
-        AcademicTerm term = seedTerm("FACAVAIL");
+        AcademicTerm term = seedTerm("FACAVL");
         subjectFacultyAssignmentRepository.save(new SubjectFacultyAssignment(subject, faculty, division, batch, term));
         // Faculty is available only 11:00-19:00 - the requested 09:00-11:00 falls entirely outside it.
         facultyAvailabilityRepository.save(new FacultyAvailability(faculty, term, DayOfWeek.MONDAY, LocalTime.of(11, 0), LocalTime.of(19, 0)));
@@ -327,7 +327,7 @@ class AlternativeSuggestionIT {
         Batch batch = batchRepository.save(new Batch(division, "A1", 30));
         Subject subject = subjectRepository.save(new Subject(year, "IT-ALT-SUB-PERSIST", "Test Subject"));
         Faculty faculty = facultyRepository.save(new Faculty("IT-ALT-FAC-PERSIST", "Faculty PERSIST", null, null));
-        AcademicTerm term = seedTerm("PERSIST");
+        AcademicTerm term = seedTerm("PERSIS");
         subjectFacultyAssignmentRepository.save(new SubjectFacultyAssignment(subject, faculty, division, batch, term));
         facultyAvailabilityRepository.save(new FacultyAvailability(faculty, term, DayOfWeek.MONDAY, LocalTime.of(11, 0), LocalTime.of(19, 0)));
         seedLab("PERSIST-A", 30, seedLabType("PERSIST"));

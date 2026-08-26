@@ -195,7 +195,7 @@ class ScoringEngineIT {
         subject.setLabTypeRequirement(null, preferredType);
         subjectRepository.saveAndFlush(subject);
         Faculty faculty = facultyRepository.save(new Faculty("IT-SC-FAC-PREFTYPE", "Faculty PREFTYPE", null, null));
-        AcademicTerm term = seedTerm("PREFTYPE");
+        AcademicTerm term = seedTerm("PREFTYP");
         subjectFacultyAssignmentRepository.save(new SubjectFacultyAssignment(subject, faculty, division, batch, term));
         Lab matchingLab = seedLab("PREFTYPE-MATCH", 45, preferredType);
         Lab mismatchedLab = seedLab("PREFTYPE-MISMATCH", 45, otherType);
@@ -223,7 +223,7 @@ class ScoringEngineIT {
         subject.setLabTypeRequirement(null, preferredType);
         subjectRepository.saveAndFlush(subject);
         Faculty faculty = facultyRepository.save(new Faculty("IT-SC-FAC-HARDSOFT", "Faculty HARDSOFT", null, null));
-        AcademicTerm term = seedTerm("HARDSOFT");
+        AcademicTerm term = seedTerm("HARDSFT");
         subjectFacultyAssignmentRepository.save(new SubjectFacultyAssignment(subject, faculty, division, batch, term));
         // Undersized (40 < required 68) but matches the preferred type - a perfect soft-score candidate that must still be rejected.
         Lab undersizedButPreferred = seedLab("HARDSOFT-SMALL", 40, preferredType);
@@ -249,7 +249,7 @@ class ScoringEngineIT {
         Batch batch = batchRepository.save(new Batch(division, "A1", 500));
         Subject subject = subjectRepository.save(new Subject(year, "IT-SC-SUB-ZEROVALID", "Test Subject"));
         Faculty faculty = facultyRepository.save(new Faculty("IT-SC-FAC-ZEROVALID", "Faculty ZEROVALID", null, null));
-        AcademicTerm term = seedTerm("ZEROVALID");
+        AcademicTerm term = seedTerm("ZEROVAL");
         subjectFacultyAssignmentRepository.save(new SubjectFacultyAssignment(subject, faculty, division, batch, term));
         seedLab("ZEROVALID", 70, seedLabType("ZEROVALID"));
 

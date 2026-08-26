@@ -195,7 +195,7 @@ class AutomaticSchedulingIT {
         Batch batch = batchRepository.save(new Batch(division, "A1", 30));
         Subject subject = subjectRepository.save(new Subject(year, "IT-AUTO-SUB-PERSIST", "Test Subject"));
         Faculty faculty = facultyRepository.save(new Faculty("IT-AUTO-FAC-PERSIST", "Faculty PERSIST", null, null));
-        AcademicTerm term = seedTerm("PERSIST");
+        AcademicTerm term = seedTerm("PERST");
         subjectFacultyAssignmentRepository.save(new SubjectFacultyAssignment(subject, faculty, division, batch, term));
         facultyAvailabilityRepository.save(new FacultyAvailability(faculty, term, DayOfWeek.MONDAY, LocalTime.of(9, 0), LocalTime.of(19, 0)));
         LabType type = seedLabType("PERSIST");
@@ -263,7 +263,7 @@ class AutomaticSchedulingIT {
         Batch batch = batchRepository.save(new Batch(division, "A1", 30));
         Subject subject = subjectRepository.save(new Subject(year, "IT-AUTO-SUB-NOPERSIST", "Test Subject"));
         Faculty faculty = facultyRepository.save(new Faculty("IT-AUTO-FAC-NOPERSIST", "Faculty NOPERSIST", null, null));
-        AcademicTerm term = seedTerm("NOPERSIST");
+        AcademicTerm term = seedTerm("NOPST");
         subjectFacultyAssignmentRepository.save(new SubjectFacultyAssignment(subject, faculty, division, batch, term));
         facultyAvailabilityRepository.save(new FacultyAvailability(faculty, term, DayOfWeek.MONDAY, LocalTime.of(9, 0), LocalTime.of(19, 0)));
         seedLab("NOPERSIST-A", 30, seedLabType("NOPERSIST"));
