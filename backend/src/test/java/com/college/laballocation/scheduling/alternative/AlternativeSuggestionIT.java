@@ -33,7 +33,6 @@ import com.college.laballocation.scheduling.ScheduleVersion;
 import com.college.laballocation.scheduling.ScheduleVersionRepository;
 import com.college.laballocation.scheduling.SchedulingRequest;
 import com.college.laballocation.scheduling.TargetType;
-import com.college.laballocation.scheduling.explanation.ExplainableAllocationService;
 import com.college.laballocation.subject.Subject;
 import com.college.laballocation.subject.SubjectRepository;
 import com.college.laballocation.user.AppUser;
@@ -109,9 +108,6 @@ class AlternativeSuggestionIT {
     private AllocationRepository allocationRepository;
 
     @Autowired
-    private ExplainableAllocationService explainableAllocationService;
-
-    @Autowired
     private ScheduleVersionRepository scheduleVersionRepository;
 
     @Autowired
@@ -174,21 +170,21 @@ class AlternativeSuggestionIT {
         Lab occupiedLab = seedLab("LABCONF-OCC", 30, type);
         Lab freeLab = seedLab("LABCONF-FREE", 30, type);
 
+        // occupiedLab's existing booking must belong to a genuinely different batch/faculty - the
+        // same batch/faculty can't be in two rooms at once, so reusing this test's own batch/faculty
+        // here would make occupiedLab correctly reject on FACULTY_CONFLICT/BATCH_CONFLICT for
+        // freeLab too, defeating the "same time, different lab" scenario this test means to prove.
+        Batch otherBatch = batchRepository.save(new Batch(division, "A2", 30));
+        Subject otherSubject = subjectRepository.save(new Subject(year, "IT-ALT-SUB-LC2", "Other Subject"));
+        Faculty otherFaculty = facultyRepository.save(new Faculty("IT-ALT-FAC-LC2", "Faculty LC2", null, null));
         Allocation existing = Allocation.forBatch(
-                AllocationType.EXTRA, division, batch, subject, faculty, occupiedLab,
+                AllocationType.EXTRA, division, otherBatch, otherSubject, otherFaculty, occupiedLab,
                 MONDAY, LocalTime.of(9, 0), LocalTime.of(11, 0), AllocationStatus.APPROVED, version, user);
         allocationRepository.saveAndFlush(existing);
 
         SchedulingRequest request = new SchedulingRequest(
                 AllocationType.EXTRA, TargetType.BATCH, division.getId(), batch.getId(), subject.getId(), faculty.getId(), term.getId(),
                 MONDAY, LocalTime.of(9, 0), LocalTime.of(11, 0), null);
-
-        var directRecommendation = explainableAllocationService.recommend(request);
-        System.out.println("[DIAG] direct recommend() status=" + directRecommendation.status()
-                + " totalCandidates=" + directRecommendation.totalCandidatesEvaluated()
-                + " validCount=" + directRecommendation.validCandidateCount());
-        directRecommendation.rejectedCandidates().forEach(r -> System.out.println(
-                "[DIAG] rejected lab=" + r.labCode() + " violations=" + r.violations()));
 
         AlternativeSearchResult result = alternativeSuggestionService.findAlternatives(request);
 

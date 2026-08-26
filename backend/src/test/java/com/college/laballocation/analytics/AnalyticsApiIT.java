@@ -176,8 +176,16 @@ class AnalyticsApiIT {
     }
 
     private Lab seedLab(String suffix) {
+        return seedLab(suffix, "C");
+    }
+
+    // lab-utilization has no per-test isolation (every prior test's labs remain in the shared
+    // database with no rollback) and always includes every active lab system-wide unless filtered -
+    // a distinct wing lets a test that asserts an exact aggregate (like weighted overall
+    // utilization) scope its query to only the labs it created.
+    private Lab seedLab(String suffix, String wing) {
         LabType labType = labTypeRepository.save(new LabType("AN-TYPE-" + suffix, "Test Lab Type " + suffix, null));
-        return labRepository.save(new Lab("AN-LAB-" + suffix, "Test Lab " + suffix, 30, labType, "C", "2", "1"));
+        return labRepository.save(new Lab("AN-LAB-" + suffix, "Test Lab " + suffix, 30, labType, wing, "2", "1"));
     }
 
     private ScheduleVersion publishedVersion(Fixture fixture, AppUser labAssistant) {
@@ -276,8 +284,8 @@ class AnalyticsApiIT {
     @Test
     void weightedOverallUtilizationIsNotANaiveAverageOfPerLabPercentages() {
         Fixture fixture = seedFixture("WEIGHTED", MONDAY, MONDAY.plusDays(1));
-        Lab labA = seedLab("WEIGHTED-A"); // available 600min, booked 300min -> 50%
-        Lab labB = seedLab("WEIGHTED-B"); // available 120min (after unavailability), booked 120min -> 100%
+        Lab labA = seedLab("WEIGHTED-A", "WEIGHTED"); // available 600min, booked 300min -> 50%
+        Lab labB = seedLab("WEIGHTED-B", "WEIGHTED"); // available 120min (after unavailability), booked 120min -> 100%
         AppUser labAssistant = seedUser(UserRole.LAB_ASSISTANT, "an-la-weighted@example.edu");
         ScheduleVersion version = publishedVersion(fixture, labAssistant);
         Faculty secondFaculty = facultyRepository.save(new Faculty("AN-FAC-WEIGHTED2", "Faculty WEIGHTED2", null, null));
@@ -288,8 +296,9 @@ class AnalyticsApiIT {
                 labB, timeMapper.toInstant(MONDAY, LocalTime.of(11, 0)), timeMapper.toInstant(MONDAY, LocalTime.of(19, 0)), "maintenance", labAssistant));
 
         ResponseEntity<String> response = restTemplate.exchange(
-                url("/api/analytics/lab-utilization?academicTermId=" + fixture.term().getId() + "&from=" + MONDAY + "&to=" + MONDAY), HttpMethod.GET,
-                new HttpEntity<>(jsonAuth(tokenFor(labAssistant))), String.class);
+                url("/api/analytics/lab-utilization?academicTermId=" + fixture.term().getId() + "&from=" + MONDAY + "&to=" + MONDAY
+                        + "&wing=WEIGHTED"),
+                HttpMethod.GET, new HttpEntity<>(jsonAuth(tokenFor(labAssistant))), String.class);
 
         assertThat(response.getBody())
                 .contains("\"labCode\":\"" + labA.getCode() + "\"")
