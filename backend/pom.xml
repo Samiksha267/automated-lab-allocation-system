@@ -113,6 +113,18 @@
 			<artifactId>spring-boot-starter-webmvc-test</artifactId>
 			<scope>test</scope>
 		</dependency>
+		<!-- TestRestTemplateTestAutoConfiguration's bean method (spring-boot-resttestclient)
+		     returns org.springframework.boot.restclient.RestTemplateBuilder - a separate
+		     artifact in Spring Boot 4.1.1's modularized structure, not pulled in by any
+		     other declared dependency. Without it, Spring's condition evaluation for that
+		     bean fails to reflectively resolve the method's return type and crashes
+		     ApplicationContext startup for every @AutoConfigureTestRestTemplate test. This
+		     app has no other use for RestTemplate/RestClient, so test-scope only. -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-restclient</artifactId>
+			<scope>test</scope>
+		</dependency>
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-security-test</artifactId>
