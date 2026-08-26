@@ -124,6 +124,9 @@ public class Allocation {
     @Column(name = "cancellation_reason", length = 500)
     private String cancellationReason;
 
+    @Column(name = "source_import_id")
+    private Long sourceImportId;
+
     protected Allocation() {}
 
     private Allocation(
@@ -306,5 +309,14 @@ public class Allocation {
 
     public String getCancellationReason() {
         return cancellationReason;
+    }
+
+    public Long getSourceImportId() {
+        return sourceImportId;
+    }
+
+    /** Set once, immediately after construction, only by {@code TimetableImportService.approve} (Phase 19, PART 38) - traceability from a confirmed allocation back to the PDF import that created it. {@code null} for every other allocation source (EXTRA bookings, PDF-import predecessor-less rows). */
+    public void recordSourceImport(Long sourceImportId) {
+        this.sourceImportId = sourceImportId;
     }
 }

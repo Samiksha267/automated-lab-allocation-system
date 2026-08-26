@@ -1,0 +1,23 @@
+# Phase 26 - deliberately minimal. application.yml's own defaults (Hibernate `ddl-auto: validate`,
+# actuator `show-details: when-authorized`, Flyway enabled) are already production-safe and are not
+# duplicated here. This profile only overrides what genuinely differs from dev/default:
+#   - no DEBUG logging (application-dev.yml turns this on; the base profile has no override, so this
+#     is otherwise implicit, but stated here explicitly so "prod" never silently inherits it if a
+#     future change adds a DEBUG default elsewhere)
+#   - unformatted SQL logging (verbose multi-line SQL in production logs is operational noise)
+#
+# No dev-seed section exists here on purpose: DevUserSeeder/DevAcademicSeeder/DevLabSeeder/etc. are all
+# `@Profile("dev")` - they structurally cannot run under `prod`, so there is nothing to "turn off."
+# ProductionJwtSecretGuard (`@Profile("prod")`) additionally fails startup if JWT_SECRET is missing,
+# the known dev placeholder, or shorter than HS256's 32-byte minimum.
+logging:
+  level:
+    root: INFO
+    com.college.laballocation: INFO
+    org.flywaydb: INFO
+
+spring:
+  jpa:
+    properties:
+      hibernate:
+        format_sql: false

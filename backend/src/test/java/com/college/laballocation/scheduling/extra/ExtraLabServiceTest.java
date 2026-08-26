@@ -123,6 +123,9 @@ class ExtraLabServiceTest {
     @Mock
     private LabService labService;
 
+    @Mock
+    private com.college.laballocation.audit.AuditLogService auditLogService;
+
     private ExtraLabService service;
 
     private Division division;
@@ -149,7 +152,8 @@ class ExtraLabServiceTest {
         service = new ExtraLabService(
                 crOwnershipService, facultyAssignmentResolutionService, alternativeSuggestionService,
                 schedulingContextFactory, candidateAllocationFactory, constraintEngine, scheduleVersionRepository,
-                allocationRepository, divisionRepository, batchService, subjectService, facultyService, labService);
+                allocationRepository, divisionRepository, batchService, subjectService, facultyService, labService,
+                auditLogService);
 
         Program program = new Program("EXTRA-PROG", "Extra Lab Test Program", 4);
         Stream stream = new Stream(program, "CS", "CS");
@@ -296,7 +300,11 @@ class ExtraLabServiceTest {
         when(facultyService.getEntity(faculty.getId())).thenReturn(faculty);
         when(labService.getEntity(lab.getId())).thenReturn(lab);
         when(batchService.getEntity(batch.getId())).thenReturn(batch);
-        when(allocationRepository.saveAndFlush(any(Allocation.class))).thenAnswer(inv -> inv.getArgument(0));
+        when(allocationRepository.saveAndFlush(any(Allocation.class))).thenAnswer(inv -> {
+            Allocation saved = inv.getArgument(0);
+            setId(saved, 100L);
+            return saved;
+        });
 
         ExtraLabAllocationResponse response = service.book(crUser.getId(), bookingRequest());
 
@@ -330,7 +338,11 @@ class ExtraLabServiceTest {
         when(facultyService.getEntity(faculty.getId())).thenReturn(faculty);
         when(labService.getEntity(lab.getId())).thenReturn(lab);
         when(batchService.getEntity(batch.getId())).thenReturn(batch);
-        when(allocationRepository.saveAndFlush(any(Allocation.class))).thenAnswer(inv -> inv.getArgument(0));
+        when(allocationRepository.saveAndFlush(any(Allocation.class))).thenAnswer(inv -> {
+            Allocation saved = inv.getArgument(0);
+            setId(saved, 100L);
+            return saved;
+        });
 
         service.book(crUser.getId(), bookingRequest());
 
@@ -487,6 +499,7 @@ class ExtraLabServiceTest {
                 AllocationType.EXTRA, division, batch, subject, faculty, lab,
                 LocalDate.of(2026, 8, 24), LocalTime.of(9, 0), LocalTime.of(11, 0),
                 AllocationStatus.PUBLISHED, publishedVersion(), crUser);
+        setId(extra, 42L);
         when(allocationRepository.findByIdForUpdate(42L)).thenReturn(Optional.of(extra));
         when(crOwnershipService.requireOwnsDivision(crUser.getId(), division.getId())).thenReturn(assignment);
 
@@ -512,6 +525,25 @@ class ExtraLabServiceTest {
         assertThatThrownBy(() -> service.cancel(crUser.getId(), 42L, null))
                 .isInstanceOf(ApiException.class)
                 .satisfies(ex -> assertThat(((ApiException) ex).getCode()).isEqualTo("INVALID_ALLOCATION_TRANSITION"));
+    }
+
+    /** Phase 18, PART 10/23/67 - an EXTRA allocation whose schedule version has since been superseded by a republish is permanent history and must not be cancelled. */
+    @Test
+    void cancelRejectsWhenTheAllocationsScheduleVersionIsNoLongerCurrent() {
+        ScheduleVersion superseded = new ScheduleVersion(term, 1, null, crUser);
+        setId(superseded, 10L);
+        superseded.publish(crUser);
+        superseded.supersede();
+        Allocation extra = Allocation.forBatch(
+                AllocationType.EXTRA, division, batch, subject, faculty, lab,
+                LocalDate.of(2026, 8, 24), LocalTime.of(9, 0), LocalTime.of(11, 0),
+                AllocationStatus.PUBLISHED, superseded, crUser);
+        when(allocationRepository.findByIdForUpdate(42L)).thenReturn(Optional.of(extra));
+
+        assertThatThrownBy(() -> service.cancel(crUser.getId(), 42L, null))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> assertThat(((ApiException) ex).getCode()).isEqualTo("SCHEDULE_VERSION_NOT_CURRENT"));
+        verify(crOwnershipService, never()).requireOwnsDivision(anyLong(), anyLong());
     }
 
     // --- mine() / activity() delegation ---

@@ -7,6 +7,7 @@ import com.college.laballocation.lab.LabDtos.UpdateLabRequest;
 import jakarta.validation.Valid;
 import java.util.List;
 import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -50,13 +51,13 @@ public class LabController {
 
     @PostMapping
     @PreAuthorize("hasRole('LAB_ASSISTANT')")
-    public LabResponse create(@Valid @RequestBody CreateLabRequest request) {
-        return labService.create(request);
+    public LabResponse create(@Valid @RequestBody CreateLabRequest request, @AuthenticationPrincipal Long userId) {
+        return labService.create(request, userId);
     }
 
     @PatchMapping("/{id}")
     @PreAuthorize("hasRole('LAB_ASSISTANT')")
-    public LabResponse update(@PathVariable Long id, @Valid @RequestBody UpdateLabRequest request) {
-        return labService.update(id, request);
+    public LabResponse update(@PathVariable Long id, @Valid @RequestBody UpdateLabRequest request, @AuthenticationPrincipal Long userId) {
+        return labService.update(id, request, userId);
     }
 }

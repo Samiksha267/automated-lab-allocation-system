@@ -3,6 +3,7 @@ package com.college.laballocation.lab;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.when;
 
+import com.college.laballocation.audit.AuditLogService;
 import com.college.laballocation.common.ApiException;
 import com.college.laballocation.lab.LabUnavailabilityDtos.CreateLabUnavailabilityRequest;
 import com.college.laballocation.user.AppUser;
@@ -29,11 +30,14 @@ class LabUnavailabilityServiceTest {
     @Mock
     private UserRepository userRepository;
 
+    @Mock
+    private AuditLogService auditLogService;
+
     private LabUnavailabilityService service;
 
     @Test
     void endBeforeStartIsRejected() {
-        service = new LabUnavailabilityService(unavailabilityRepository, labService, userRepository);
+        service = new LabUnavailabilityService(unavailabilityRepository, labService, userRepository, auditLogService);
         Instant start = Instant.now();
         Instant end = start.minus(1, ChronoUnit.HOURS);
 
@@ -46,7 +50,7 @@ class LabUnavailabilityServiceTest {
 
     @Test
     void endEqualToStartIsRejected() {
-        service = new LabUnavailabilityService(unavailabilityRepository, labService, userRepository);
+        service = new LabUnavailabilityService(unavailabilityRepository, labService, userRepository, auditLogService);
         Instant start = Instant.now();
 
         var request = new CreateLabUnavailabilityRequest(start, start, "Maintenance");
@@ -58,7 +62,7 @@ class LabUnavailabilityServiceTest {
 
     @Test
     void validIntervalProceedsToLookup() {
-        service = new LabUnavailabilityService(unavailabilityRepository, labService, userRepository);
+        service = new LabUnavailabilityService(unavailabilityRepository, labService, userRepository, auditLogService);
         Instant start = Instant.now();
         Instant end = start.plus(2, ChronoUnit.HOURS);
         when(labService.getEntity(1L)).thenThrow(new RuntimeException("expected - stops before user lookup"));

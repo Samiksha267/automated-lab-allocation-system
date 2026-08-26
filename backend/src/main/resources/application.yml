@@ -20,6 +20,15 @@ spring:
     enabled: true
     locations: classpath:db/migration
     baseline-on-migrate: false
+  servlet:
+    multipart:
+      # Phase 19 PDF upload - Spring's own enforcement, in addition to
+      # TimetableImportService's own explicit MAX_FILE_SIZE_BYTES check
+      # (defense in depth, PART 11/45): a request whose file exceeds this is
+      # rejected by Spring before the controller method (and therefore this
+      # project's own limit check) is ever reached.
+      max-file-size: 10MB
+      max-request-size: 12MB
 
 server:
   port: ${SERVER_PORT:8080}

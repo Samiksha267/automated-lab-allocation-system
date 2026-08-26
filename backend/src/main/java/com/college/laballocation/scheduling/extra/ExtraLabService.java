@@ -5,6 +5,10 @@ import com.college.laballocation.academic.CrAssignment;
 import com.college.laballocation.academic.CrOwnershipService;
 import com.college.laballocation.academic.Division;
 import com.college.laballocation.academic.DivisionRepository;
+import com.college.laballocation.audit.AuditAction;
+import com.college.laballocation.audit.AuditEvent;
+import com.college.laballocation.audit.AuditLogService;
+import com.college.laballocation.audit.AuditResourceType;
 import com.college.laballocation.common.ApiException;
 import com.college.laballocation.common.ResourceNotFoundException;
 import com.college.laballocation.faculty.Faculty;
@@ -43,6 +47,7 @@ import com.college.laballocation.user.AppUser;
 import com.college.laballocation.user.UserRole;
 import java.time.LocalDate;
 import java.time.LocalTime;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import org.hibernate.exception.ConstraintViolationException;
@@ -108,6 +113,7 @@ public class ExtraLabService {
     private final SubjectService subjectService;
     private final FacultyService facultyService;
     private final LabService labService;
+    private final AuditLogService auditLogService;
 
     public ExtraLabService(
             CrOwnershipService crOwnershipService,
@@ -122,7 +128,8 @@ public class ExtraLabService {
             BatchService batchService,
             SubjectService subjectService,
             FacultyService facultyService,
-            LabService labService) {
+            LabService labService,
+            AuditLogService auditLogService) {
         this.crOwnershipService = crOwnershipService;
         this.facultyAssignmentResolutionService = facultyAssignmentResolutionService;
         this.alternativeSuggestionService = alternativeSuggestionService;
@@ -136,6 +143,7 @@ public class ExtraLabService {
         this.subjectService = subjectService;
         this.facultyService = facultyService;
         this.labService = labService;
+        this.auditLogService = auditLogService;
     }
 
     /** Advisory only - reuses the Phase 12/13 pipeline end-to-end; persists nothing (PART 9). */
@@ -220,6 +228,14 @@ public class ExtraLabService {
                 userId, divisionId, request.labId(), request.allocationDate(), request.startTime(), request.endTime());
         try {
             Allocation saved = allocationRepository.saveAndFlush(allocation);
+            auditLogService.record(new AuditEvent(
+                    userId, UserRole.CR, AuditAction.EXTRA_LAB_BOOKED, AuditResourceType.ALLOCATION, saved.getId(),
+                    "Lab " + lab.getCode() + " " + request.allocationDate() + " " + request.startTime() + "-" + request.endTime(),
+                    assignment.getAcademicTerm().getId(), divisionId,
+                    bookingMetadata(lab, subject, faculty, request)));
+            // Same transaction as the insert above (default REQUIRED propagation, AuditLogService
+            // javadoc) - if this audit write fails, the whole transaction (including the just-saved
+            // allocation) rolls back rather than committing a booking with no historical record (PART 21/31).
             return ExtraLabAllocationResponse.from(saved);
         } catch (DataIntegrityViolationException e) {
             throw allocationConcurrencyConflict(e, "exclusion constraint");
@@ -267,9 +283,26 @@ public class ExtraLabService {
                     "EXTRA_ALLOCATION_FORBIDDEN", HttpStatus.FORBIDDEN,
                     "Only EXTRA allocations can be cancelled through this workflow.");
         }
+        // Phase 18: an EXTRA allocation attaches to whatever version was PUBLISHED
+        // at booking time (ADR-070); if the term's schedule has since been
+        // republished, that version is now SUPERSEDED (permanent, read-only
+        // history, docs/15-DESIGN-DECISIONS.md ADR-086) and must not be mutated,
+        // even by cancelling one of its rows.
+        if (allocation.getScheduleVersion().getStatus() != ScheduleVersionStatus.PUBLISHED) {
+            throw new ApiException(
+                    "SCHEDULE_VERSION_NOT_CURRENT", HttpStatus.CONFLICT,
+                    "This allocation belongs to a schedule version that is no longer current and cannot be modified.");
+        }
         CrAssignment assignment = crOwnershipService.requireOwnsDivision(userId, allocation.getDivision().getId());
 
-        allocation.cancel(assignment.getUser(), normalizeReason(request));
+        String reason = normalizeReason(request);
+        allocation.cancel(assignment.getUser(), reason);
+        auditLogService.record(new AuditEvent(
+                userId, UserRole.CR, AuditAction.EXTRA_LAB_CANCELLED, AuditResourceType.ALLOCATION, allocation.getId(),
+                "Lab " + allocation.getLab().getCode() + " " + allocation.getAllocationDate() + " "
+                        + allocation.getStartTime() + "-" + allocation.getEndTime(),
+                allocation.getScheduleVersion().getAcademicTerm().getId(), allocation.getDivision().getId(),
+                cancellationMetadata(allocation, reason)));
         return ExtraLabAllocationResponse.from(allocation);
     }
 
@@ -422,6 +455,35 @@ public class ExtraLabService {
             cause = cause.getCause();
         }
         return null;
+    }
+
+    /** Small, event-specific, non-sensitive detail only (audit PART 12/14) - never a serialized entity. */
+    private Map<String, Object> bookingMetadata(Lab lab, Subject subject, Faculty faculty, ExtraLabBookingRequest request) {
+        Map<String, Object> metadata = new LinkedHashMap<>();
+        metadata.put("labCode", lab.getCode());
+        metadata.put("subjectCode", subject.getCode());
+        if (request.targetType() == TargetType.BATCH) {
+            metadata.put("batchCode", batchService.getEntity(request.batchId()).getCode());
+        }
+        metadata.put("facultyCode", faculty.getEmployeeCode());
+        metadata.put("allocationDate", request.allocationDate().toString());
+        metadata.put("startTime", request.startTime().toString());
+        metadata.put("endTime", request.endTime().toString());
+        metadata.put("targetType", request.targetType().toString());
+        return metadata;
+    }
+
+    private Map<String, Object> cancellationMetadata(Allocation allocation, String reason) {
+        Map<String, Object> metadata = new LinkedHashMap<>();
+        metadata.put("labCode", allocation.getLab().getCode());
+        metadata.put("subjectCode", allocation.getSubject().getCode());
+        metadata.put("allocationDate", allocation.getAllocationDate().toString());
+        metadata.put("startTime", allocation.getStartTime().toString());
+        metadata.put("endTime", allocation.getEndTime().toString());
+        if (reason != null) {
+            metadata.put("reason", reason);
+        }
+        return metadata;
     }
 
     private String normalizeReason(ExtraLabCancelRequest request) {

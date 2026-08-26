@@ -2,3 +2,12 @@
 
 /* Minimal foundation only - visual polish is not a Phase 2 goal.
    Role-specific dashboards will bring their own styling in later phases. */
+
+/* Shared form-input styling (Phase 20) - one class every text/select/date
+   input in the Lab Assistant screens uses, instead of repeating the same
+   Tailwind utility string in every form. */
+@layer components {
+  .input {
+    @apply w-full rounded border border-slate-300 px-2 py-1.5 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500;
+  }
+}

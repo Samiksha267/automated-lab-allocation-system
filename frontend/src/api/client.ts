@@ -78,11 +78,40 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+async function requestMultipart<T>(path: string, formData: FormData): Promise<T> {
+  const token = tokenStorage.get();
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    method: "POST",
+    // No Content-Type header here deliberately - the browser sets the
+    // multipart boundary itself; setting it manually breaks the upload.
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    body: formData,
+  });
+
+  if (!response.ok) {
+    let body: ApiErrorBody;
+    try {
+      body = await response.json();
+    } catch {
+      body = { code: "UNKNOWN_ERROR", message: `Request failed with status ${response.status}` };
+    }
+    if (response.status === 401) {
+      unauthorizedHandler?.();
+    }
+    throw new ApiError(body, response.status);
+  }
+
+  return response.json() as Promise<T>;
+}
+
 export const apiClient = {
   get: <T>(path: string) => request<T>(path, { method: "GET" }),
   post: <T>(path: string, body?: unknown) =>
     request<T>(path, { method: "POST", body: body ? JSON.stringify(body) : undefined }),
   patch: <T>(path: string, body?: unknown) =>
     request<T>(path, { method: "PATCH", body: body ? JSON.stringify(body) : undefined }),
+  put: <T>(path: string, body?: unknown) => request<T>(path, { method: "PUT", body: body ? JSON.stringify(body) : undefined }),
   delete: <T>(path: string) => request<T>(path, { method: "DELETE" }),
+  /** File uploads (Phase 19 PDF import) - multipart/form-data, never JSON-serialized. */
+  postMultipart: <T>(path: string, formData: FormData) => requestMultipart<T>(path, formData),
 };

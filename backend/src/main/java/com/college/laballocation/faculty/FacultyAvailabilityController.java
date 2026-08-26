@@ -10,6 +10,7 @@ import java.time.LocalTime;
 import java.util.List;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
@@ -49,8 +50,10 @@ public class FacultyAvailabilityController {
     @PostMapping
     @PreAuthorize("hasRole('LAB_ASSISTANT')")
     public FacultyAvailabilityResponse create(
-            @PathVariable Long facultyId, @Valid @RequestBody CreateFacultyAvailabilityRequest request) {
-        return availabilityService.create(facultyId, request);
+            @PathVariable Long facultyId,
+            @Valid @RequestBody CreateFacultyAvailabilityRequest request,
+            @AuthenticationPrincipal Long userId) {
+        return availabilityService.create(facultyId, request, userId);
     }
 
     @PatchMapping("/{availabilityId}")
@@ -58,14 +61,15 @@ public class FacultyAvailabilityController {
     public FacultyAvailabilityResponse update(
             @PathVariable Long facultyId,
             @PathVariable Long availabilityId,
-            @Valid @RequestBody UpdateFacultyAvailabilityRequest request) {
-        return availabilityService.update(facultyId, availabilityId, request);
+            @Valid @RequestBody UpdateFacultyAvailabilityRequest request,
+            @AuthenticationPrincipal Long userId) {
+        return availabilityService.update(facultyId, availabilityId, request, userId);
     }
 
     @DeleteMapping("/{availabilityId}")
     @PreAuthorize("hasRole('LAB_ASSISTANT')")
-    public void remove(@PathVariable Long facultyId, @PathVariable Long availabilityId) {
-        availabilityService.remove(facultyId, availabilityId);
+    public void remove(@PathVariable Long facultyId, @PathVariable Long availabilityId, @AuthenticationPrincipal Long userId) {
+        availabilityService.remove(facultyId, availabilityId, userId);
     }
 
     /** Administrative preview only (PART 24) - "availability check," never scheduling/conflict validation. */

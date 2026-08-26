@@ -1,5 +1,9 @@
 package com.college.laballocation.lab;
 
+import com.college.laballocation.audit.AuditAction;
+import com.college.laballocation.audit.AuditEvent;
+import com.college.laballocation.audit.AuditLogService;
+import com.college.laballocation.audit.AuditResourceType;
 import com.college.laballocation.common.ApiException;
 import com.college.laballocation.common.ResourceNotFoundException;
 import com.college.laballocation.lab.LabDtos.CreateLabRequest;
@@ -8,7 +12,9 @@ import com.college.laballocation.lab.LabDtos.InstalledSoftwareItem;
 import com.college.laballocation.lab.LabDtos.LabResponse;
 import com.college.laballocation.lab.LabDtos.LabSummaryResponse;
 import com.college.laballocation.lab.LabDtos.UpdateLabRequest;
+import com.college.laballocation.user.UserRole;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import org.springframework.data.jpa.domain.Specification;
 import org.springframework.http.HttpStatus;
@@ -23,16 +29,19 @@ public class LabService {
     private final LabTypeService labTypeService;
     private final LabSoftwareRepository labSoftwareRepository;
     private final LabEquipmentRepository labEquipmentRepository;
+    private final AuditLogService auditLogService;
 
     public LabService(
             LabRepository labRepository,
             LabTypeService labTypeService,
             LabSoftwareRepository labSoftwareRepository,
-            LabEquipmentRepository labEquipmentRepository) {
+            LabEquipmentRepository labEquipmentRepository,
+            AuditLogService auditLogService) {
         this.labRepository = labRepository;
         this.labTypeService = labTypeService;
         this.labSoftwareRepository = labSoftwareRepository;
         this.labEquipmentRepository = labEquipmentRepository;
+        this.auditLogService = auditLogService;
     }
 
     public Lab getEntity(Long id) {
@@ -71,22 +80,30 @@ public class LabService {
     }
 
     @Transactional
-    public LabResponse create(CreateLabRequest request) {
+    public LabResponse create(CreateLabRequest request, Long actingUserId) {
         if (labRepository.existsByCode(request.code())) {
             throw new ApiException("VALIDATION_ERROR", HttpStatus.BAD_REQUEST, "Lab code already exists: " + request.code());
         }
         LabType labType = labTypeService.getEntity(request.labTypeId());
         Lab saved = labRepository.save(new Lab(
                 request.code(), request.name(), request.capacity(), labType, request.wing(), request.floor(), request.roomNumber()));
+        auditLogService.record(new AuditEvent(
+                actingUserId, UserRole.LAB_ASSISTANT, AuditAction.LAB_CREATED, AuditResourceType.LAB, saved.getId(),
+                saved.getCode(), null, null,
+                Map.of("labCode", saved.getCode(), "capacity", saved.getCapacity(), "labTypeCode", labType.getCode())));
         return toFullResponse(saved);
     }
 
     /** {@code code} is deliberately not updatable - see {@link Lab} javadoc. */
     @Transactional
-    public LabResponse update(Long id, UpdateLabRequest request) {
+    public LabResponse update(Long id, UpdateLabRequest request, Long actingUserId) {
         Lab lab = getEntity(id);
         LabType labType = labTypeService.getEntity(request.labTypeId());
         lab.update(request.name(), request.capacity(), labType, request.wing(), request.floor(), request.roomNumber(), request.active());
+        auditLogService.record(new AuditEvent(
+                actingUserId, UserRole.LAB_ASSISTANT, AuditAction.LAB_UPDATED, AuditResourceType.LAB, lab.getId(),
+                lab.getCode(), null, null,
+                Map.of("labCode", lab.getCode(), "capacity", lab.getCapacity(), "active", lab.isActive())));
         return toFullResponse(lab);
     }
 

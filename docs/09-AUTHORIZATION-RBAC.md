@@ -160,18 +160,17 @@ Legend: R = Read, C = Create, U = Update, D = Delete/Cancel, A = Approve, P = Pu
 | Academic hierarchy (Program/Stream/Year/Division/Batch) | R, C, U, D | R (own scope only) | R (published, filter-only) |
 | CR accounts (`app_user` role=CR) | R, C, U, D | — | — |
 | CR assignments | R, C, U, D | R (own) | — |
-| Regular timetable (PDF import) | R, C, U, A, P | R (own, published) | R (published only) |
+| PDF timetable import management (`/api/timetable-imports` — upload, review, correct, approve, reject) | R, C, U, A (all) | — | — |
 | Timetable import review/correction | R, U | — | — |
 | Extra lab: search candidates | R | C (own division) | — |
 | Extra lab: create | — | C (own division) | — |
 | Extra lab: cancel | R, D (any) | D (own division, EXTRA only) | — |
 | Regular allocation cancellation (pre-publish) | R, D | — | — |
 | Conflicts / alternatives view | R (all) | R (own division) | — |
-| Audit logs | R (all) | — | — |
-| CR activity view | R (all CRs) | — | — |
+| Audit logs (`GET /api/audit-logs`, incl. CR-activity filtering via `actorUserId`) | R (all) | — | — |
 | Analytics / utilization | R | — | — |
-| Schedule versions | R, C, P (all) | R (own, published) | R (published only) |
-| Published student timetable | R | R (own division) | R (self-filtered: program/stream/year/division/batch) |
+| Schedule-version management (`/api/schedule-versions` — create draft, publish, history, per-version allocations, any status) | R, C, P (all) | — | — |
+| Current published timetable (`GET /api/timetable`) | R | R (filtered by `divisionId`/`batchId`) | R (filtered by `divisionId`/`batchId`) |
 
 ## Notes on specific boundaries
 
@@ -203,6 +202,38 @@ Legend: R = Read, C = Create, U = Update, D = Delete/Cancel, A = Approve, P = Pu
 - CR can cancel their own EXTRA allocation; cannot cancel another division's EXTRA allocation; cannot cancel any REGULAR allocation — `ExtraLabServiceTest`/`ExtraLabApiIT` (`cancelRejectsWhenCallerDoesNotOwnAllocationsDivision`, `cancelRejectsRegularAllocationType`).
 - Lab Assistant can manage CR assignments; CR cannot — unchanged since Phase 4 (`CrAssignmentController`).
 - A deactivated/ended `cr_assignment` loses all division-scoped permissions immediately (verified by re-checking authorization on every request, not caching a stale permission at login) — unchanged since Phase 4, still holds for Phase 15's endpoints since every one resolves ownership fresh, per-request.
+
+## Tests Implemented in Phase 17 (see [11-TESTING-STRATEGY.md](11-TESTING-STRATEGY.md))
+
+- `GET /api/audit-logs`: LAB_ASSISTANT `200`, CR `403`, STUDENT `403`, unauthenticated `401` — `AuditLogApiIT.onlyLabAssistantCanReadAuditHistory`, verified live against the running Docker stack.
+- Actor filtering isolates one CR's activity from another's; a filter with no matches returns `totalElements: 0`, not another actor's rows — `AuditLogApiIT.actorFilterIsolatesOneCrsActivityFromAnother`.
+- No audit-log endpoint accepts a client-supplied actor id anywhere — actor identity is always `@AuthenticationPrincipal`-derived (ADR-077, docs/15-DESIGN-DECISIONS.md).
+
+## Tests Implemented in Phase 18 (see [11-TESTING-STRATEGY.md](11-TESTING-STRATEGY.md))
+
+- `/api/schedule-versions` (create/publish/history): CR `403`, anonymous `401` — `ScheduleVersionApiIT.draftCreationIsForbiddenToCrAndStudentAndRejectedForAnonymous`, `.onlyLabAssistantCanViewVersionHistory`, verified live.
+- `GET /api/timetable`: LAB_ASSISTANT/CR/STUDENT all `200`, anonymous `401` — verified live against the running Docker stack, all four roles.
+- A superseded EXTRA allocation cannot be cancelled by the CR who owns it — `409 SCHEDULE_VERSION_NOT_CURRENT`, `ExtraLabServiceTest.cancelRejectsWhenTheAllocationsScheduleVersionIsNoLongerCurrent`; verified live.
+
+## Tests Implemented in Phase 19 (see [11-TESTING-STRATEGY.md](11-TESTING-STRATEGY.md))
+
+- `/api/timetable-imports` (upload, list, detail, correct, approve, reject): LAB_ASSISTANT `200`, CR `403`, STUDENT `403`, anonymous `401` — verified live against every one of the six endpoints.
+
+## Phase 20 — Frontend Route Guards (see [11-TESTING-STRATEGY.md](11-TESTING-STRATEGY.md))
+
+`/lab-assistant/*` is guarded client-side by `ProtectedRoute` (authenticated? no -> `/login`) then `RequireRouteRole` (role is LAB_ASSISTANT? no -> `/`, ADR-109/110, docs/15-DESIGN-DECISIONS.md). **This is a UX/navigation convenience only** - every API call the resulting screens make still goes through the exact same backend `@PreAuthorize` checks listed above; a client bypassing the React guard entirely still gets `403`/`401` from the API. Verified both automatically (role-guard unit tests) and live (headless-Chromium: a CR session visiting `/lab-assistant` directly is redirected to `/` with zero Lab-Assistant-only navigation/content ever rendered).
+
+`GET /api/users?role=` (Phase 20, ADR-113) - `LAB_ASSISTANT` only, read-only, no create/update/delete.
+
+## Phase 21 — CR Frontend Route Guards (see [11-TESTING-STRATEGY.md](11-TESTING-STRATEGY.md))
+
+`/cr/*` is guarded identically to `/lab-assistant/*`: `ProtectedRoute` then `RequireRouteRole(["CR"])`. No new backend authorization - every CR page calls only pre-existing `CR`-only endpoints (`/api/allocations/extra/*`, `/api/cr-assignments/me`) or role-open `GET` endpoints (`/api/divisions/{id}`, `/api/subjects`, `/api/timetable`). Verified live: LAB_ASSISTANT visiting `/cr` -> redirected to `/`, zero CR content rendered; anonymous visiting `/cr` -> redirected to `/login` (via `ProtectedRoute`, checked first); a genuine two-browser-session concurrent booking race against the real UI produced exactly one success and one clean FCFS-conflict message, never two successes.
+
+## Phase 22 — Student Frontend Route Guards (see [11-TESTING-STRATEGY.md](11-TESTING-STRATEGY.md))
+
+`/student/*` is guarded identically to `/lab-assistant/*` and `/cr/*`: `ProtectedRoute` then `RequireRouteRole(["STUDENT"])`. No new authorization surface - the Student UI calls only role-open `GET` endpoints already reachable by any authenticated user (`/api/programs`, `/api/streams`, `/api/academic-years`, `/api/divisions`, `/api/batches`, `/api/academic-terms`) plus `GET /api/timetable`, which was already `@PreAuthorize("hasAnyRole('STUDENT', 'CR', 'LAB_ASSISTANT')")` since Phase 18. Verified live: CR and LAB_ASSISTANT sessions visiting `/student` directly are both redirected to `/` with zero Student content ever rendered; anonymous visiting `/student` redirects to `/login` via `ProtectedRoute`, checked first.
+
+`AllocationSpecifications.batchIdOrDivisionWide` (ADR-121, docs/15-DESIGN-DECISIONS.md) changes what rows a batch-scoped `/api/timetable` request returns, not who can call it - no authorization change.
 
 ## Remaining Gap (Phase 16)
 

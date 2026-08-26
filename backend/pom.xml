@@ -64,6 +64,19 @@
 		</dependency>
 
 		<dependency>
+			<groupId>org.apache.pdfbox</groupId>
+			<artifactId>pdfbox</artifactId>
+			<version>3.0.3</version>
+			<!-- Phase 19 PDF import - text extraction only (PDFTextStripper), never
+			     rendering/OCR/embedded-content execution. Chosen over Node/Python/an
+			     external microservice specifically to keep PDF processing inside this
+			     modular monolith (docs/15-DESIGN-DECISIONS.md ADR-097): mature, Apache
+			     2.0-licensed, actively maintained, pure-Java (no native dependency),
+			     and already a de facto standard for server-side Java PDF text
+			     extraction. -->
+		</dependency>
+
+		<dependency>
 			<groupId>org.postgresql</groupId>
 			<artifactId>postgresql</artifactId>
 			<!-- Widened from the Spring Boot starter default of "runtime" to

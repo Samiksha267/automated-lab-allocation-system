@@ -6,6 +6,7 @@ import static org.mockito.Mockito.when;
 
 import com.college.laballocation.academic.AcademicYear;
 import com.college.laballocation.academic.Program;
+import com.college.laballocation.audit.AuditLogService;
 import com.college.laballocation.common.ApiException;
 import com.college.laballocation.common.ResourceNotFoundException;
 import com.college.laballocation.lab.Equipment;
@@ -51,6 +52,9 @@ class SubjectRequirementServiceTest {
     @Mock
     private SubjectEquipmentRequirementRepository equipmentRequirementRepository;
 
+    @Mock
+    private AuditLogService auditLogService;
+
     private SubjectRequirementService service;
 
     private static void setId(Object entity, Long id) {
@@ -80,7 +84,8 @@ class SubjectRequirementServiceTest {
                 equipmentService,
                 labTypeService,
                 softwareRequirementRepository,
-                equipmentRequirementRepository);
+                equipmentRequirementRepository,
+                auditLogService);
     }
 
     @Test
@@ -91,7 +96,7 @@ class SubjectRequirementServiceTest {
         when(subjectService.getEntity(1L)).thenReturn(subject);
         when(softwareService.getEntity(2L)).thenReturn(inactive);
 
-        assertThatThrownBy(() -> service.addSoftwareRequirement(1L, new AddSoftwareRequirementRequest(2L)))
+        assertThatThrownBy(() -> service.addSoftwareRequirement(1L, new AddSoftwareRequirementRequest(2L), 1L))
                 .isInstanceOf(ApiException.class)
                 .hasFieldOrPropertyWithValue("code", "INACTIVE_SOFTWARE");
     }
@@ -104,7 +109,7 @@ class SubjectRequirementServiceTest {
         when(subjectService.getEntity(1L)).thenReturn(subject);
         when(equipmentService.getEntity(3L)).thenReturn(inactive);
 
-        assertThatThrownBy(() -> service.addEquipmentRequirement(1L, new AddEquipmentRequirementRequest(3L, 5)))
+        assertThatThrownBy(() -> service.addEquipmentRequirement(1L, new AddEquipmentRequirementRequest(3L, 5), 1L))
                 .isInstanceOf(ApiException.class)
                 .hasFieldOrPropertyWithValue("code", "INACTIVE_EQUIPMENT");
     }
@@ -118,7 +123,7 @@ class SubjectRequirementServiceTest {
         when(labTypeService.getEntity(10L)).thenReturn(required);
         when(labTypeService.getEntity(20L)).thenReturn(preferred);
 
-        assertThatThrownBy(() -> service.setLabTypeRequirement(1L, new SetLabTypeRequirementRequest(10L, 20L)))
+        assertThatThrownBy(() -> service.setLabTypeRequirement(1L, new SetLabTypeRequirementRequest(10L, 20L), 1L))
                 .isInstanceOf(ApiException.class)
                 .hasFieldOrPropertyWithValue("code", "INVALID_LAB_TYPE_PREFERENCE");
     }
@@ -130,7 +135,7 @@ class SubjectRequirementServiceTest {
         when(subjectService.getEntity(1L)).thenReturn(subject);
         when(labTypeService.getEntity(10L)).thenReturn(required);
 
-        assertThatCode(() -> service.setLabTypeRequirement(1L, new SetLabTypeRequirementRequest(10L, null)))
+        assertThatCode(() -> service.setLabTypeRequirement(1L, new SetLabTypeRequirementRequest(10L, null), 1L))
                 .doesNotThrowAnyException();
         org.assertj.core.api.Assertions.assertThat(subject.getRequiredLabType()).isEqualTo(required);
         org.assertj.core.api.Assertions.assertThat(subject.getPreferredLabType()).isNull();
@@ -140,7 +145,7 @@ class SubjectRequirementServiceTest {
     void updatingQuantityForANonExistentRequirementIsNotFound() {
         when(equipmentRequirementRepository.findBySubjectIdAndEquipmentId(1L, 99L)).thenReturn(java.util.Optional.empty());
 
-        assertThatThrownBy(() -> service.updateEquipmentRequirementQuantity(1L, 99L, 5))
+        assertThatThrownBy(() -> service.updateEquipmentRequirementQuantity(1L, 99L, 5, 1L))
                 .isInstanceOf(ResourceNotFoundException.class)
                 .hasFieldOrPropertyWithValue("code", "SUBJECT_REQUIREMENT_NOT_FOUND");
     }

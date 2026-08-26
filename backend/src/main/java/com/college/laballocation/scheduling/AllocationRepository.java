@@ -6,6 +6,7 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
 import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
@@ -23,7 +24,7 @@ import org.springframework.data.repository.query.Param;
  * both DIVISION-wide rows and BATCH rows belonging to that division, exactly
  * what HC-05's bidirectional check needs, with no join required.
  */
-public interface AllocationRepository extends JpaRepository<Allocation, Long> {
+public interface AllocationRepository extends JpaRepository<Allocation, Long>, JpaSpecificationExecutor<Allocation> {
 
     List<Allocation> findByLabIdAndAllocationDateAndStatusIn(Long labId, LocalDate allocationDate, Collection<AllocationStatus> statuses);
 
@@ -66,6 +67,19 @@ public interface AllocationRepository extends JpaRepository<Allocation, Long> {
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select a from Allocation a where a.id = :id")
     Optional<Allocation> findByIdForUpdate(@Param("id") Long id);
+
+    /**
+     * The allocations a {@code ScheduleVersion} publish transition (Phase 18)
+     * needs to carry forward from {@code APPROVED} to {@code PUBLISHED} - see
+     * {@code ScheduleVersionService.publish} and {@link Allocation#publish()}.
+     * Scoped to one status deliberately: {@code CANCELLED} rows must never be
+     * touched by a publish, and {@code PUBLISHED} rows (already published,
+     * e.g. Phase 15 EXTRA bookings) need no transition.
+     */
+    List<Allocation> findByScheduleVersionIdAndStatus(Long scheduleVersionId, AllocationStatus status);
+
+    /** How many active (non-cancelled) allocations a version currently carries - used for version-history summaries (Phase 18). */
+    long countByScheduleVersionIdAndStatusIn(Long scheduleVersionId, Collection<AllocationStatus> statuses);
 
     /**
      * Bulk scheduled-minutes-per-lab aggregation for {@code LabUtilizationService}

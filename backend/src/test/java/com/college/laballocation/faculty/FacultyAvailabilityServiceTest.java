@@ -10,6 +10,7 @@ import static org.mockito.Mockito.when;
 import com.college.laballocation.academic.AcademicTerm;
 import com.college.laballocation.academic.AcademicTermService;
 import com.college.laballocation.academic.TermStatus;
+import com.college.laballocation.audit.AuditLogService;
 import com.college.laballocation.common.ApiException;
 import com.college.laballocation.common.ResourceNotFoundException;
 import com.college.laballocation.faculty.FacultyAvailabilityDtos.CreateFacultyAvailabilityRequest;
@@ -35,6 +36,9 @@ class FacultyAvailabilityServiceTest {
 
     @Mock
     private AcademicTermService academicTermService;
+
+    @Mock
+    private AuditLogService auditLogService;
 
     private FacultyAvailabilityService service;
 
@@ -72,7 +76,7 @@ class FacultyAvailabilityServiceTest {
 
     @BeforeEach
     void setUp() {
-        service = new FacultyAvailabilityService(availabilityRepository, facultyService, academicTermService);
+        service = new FacultyAvailabilityService(availabilityRepository, facultyService, academicTermService, auditLogService);
     }
 
     @Test
@@ -179,7 +183,7 @@ class FacultyAvailabilityServiceTest {
                 });
 
         assertThatCode(() -> service.create(
-                        1L, new CreateFacultyAvailabilityRequest(10L, DayOfWeek.MONDAY, LocalTime.of(9, 0), LocalTime.of(11, 0))))
+                        1L, new CreateFacultyAvailabilityRequest(10L, DayOfWeek.MONDAY, LocalTime.of(9, 0), LocalTime.of(11, 0)), 1L))
                 .doesNotThrowAnyException();
     }
 
@@ -191,7 +195,7 @@ class FacultyAvailabilityServiceTest {
         when(academicTermService.getEntity(10L)).thenReturn(term);
 
         assertThatThrownBy(() -> service.create(
-                        1L, new CreateFacultyAvailabilityRequest(10L, DayOfWeek.MONDAY, LocalTime.of(9, 0), LocalTime.of(9, 0))))
+                        1L, new CreateFacultyAvailabilityRequest(10L, DayOfWeek.MONDAY, LocalTime.of(9, 0), LocalTime.of(9, 0)), 1L))
                 .isInstanceOf(ApiException.class)
                 .hasFieldOrPropertyWithValue("code", "INVALID_AVAILABILITY_INTERVAL");
     }
@@ -207,7 +211,7 @@ class FacultyAvailabilityServiceTest {
                 .thenReturn(List.of(window(faculty, term, DayOfWeek.MONDAY, 9, 12)));
 
         assertThatThrownBy(() -> service.create(
-                        1L, new CreateFacultyAvailabilityRequest(10L, DayOfWeek.MONDAY, LocalTime.of(11, 0), LocalTime.of(14, 0))))
+                        1L, new CreateFacultyAvailabilityRequest(10L, DayOfWeek.MONDAY, LocalTime.of(11, 0), LocalTime.of(14, 0)), 1L))
                 .isInstanceOf(ApiException.class)
                 .hasFieldOrPropertyWithValue("code", "FACULTY_AVAILABILITY_OVERLAP");
     }
@@ -224,7 +228,7 @@ class FacultyAvailabilityServiceTest {
         when(availabilityRepository.save(any(FacultyAvailability.class))).thenAnswer(invocation -> invocation.getArgument(0));
 
         assertThatCode(() -> service.create(
-                        1L, new CreateFacultyAvailabilityRequest(10L, DayOfWeek.MONDAY, LocalTime.of(12, 0), LocalTime.of(15, 0))))
+                        1L, new CreateFacultyAvailabilityRequest(10L, DayOfWeek.MONDAY, LocalTime.of(12, 0), LocalTime.of(15, 0)), 1L))
                 .doesNotThrowAnyException();
     }
 
@@ -234,7 +238,7 @@ class FacultyAvailabilityServiceTest {
                 .thenThrow(new ResourceNotFoundException("FACULTY_NOT_FOUND", "Faculty not found: 999"));
 
         assertThatThrownBy(() -> service.create(
-                        999L, new CreateFacultyAvailabilityRequest(10L, DayOfWeek.MONDAY, LocalTime.of(9, 0), LocalTime.of(11, 0))))
+                        999L, new CreateFacultyAvailabilityRequest(10L, DayOfWeek.MONDAY, LocalTime.of(9, 0), LocalTime.of(11, 0)), 1L))
                 .isInstanceOf(ResourceNotFoundException.class)
                 .hasFieldOrPropertyWithValue("code", "FACULTY_NOT_FOUND");
     }
@@ -247,7 +251,7 @@ class FacultyAvailabilityServiceTest {
         when(facultyService.getEntity(2L)).thenReturn(faculty);
 
         assertThatThrownBy(() -> service.create(
-                        2L, new CreateFacultyAvailabilityRequest(10L, DayOfWeek.MONDAY, LocalTime.of(9, 0), LocalTime.of(11, 0))))
+                        2L, new CreateFacultyAvailabilityRequest(10L, DayOfWeek.MONDAY, LocalTime.of(9, 0), LocalTime.of(11, 0)), 1L))
                 .isInstanceOf(ApiException.class)
                 .hasFieldOrPropertyWithValue("code", "FACULTY_INACTIVE");
     }
@@ -260,7 +264,7 @@ class FacultyAvailabilityServiceTest {
                 .thenThrow(new ResourceNotFoundException("ACADEMIC_TERM_NOT_FOUND", "Academic term not found: 999"));
 
         assertThatThrownBy(() -> service.create(
-                        1L, new CreateFacultyAvailabilityRequest(999L, DayOfWeek.MONDAY, LocalTime.of(9, 0), LocalTime.of(11, 0))))
+                        1L, new CreateFacultyAvailabilityRequest(999L, DayOfWeek.MONDAY, LocalTime.of(9, 0), LocalTime.of(11, 0)), 1L))
                 .isInstanceOf(ResourceNotFoundException.class)
                 .hasFieldOrPropertyWithValue("code", "ACADEMIC_TERM_NOT_FOUND");
     }

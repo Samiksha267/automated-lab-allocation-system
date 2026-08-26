@@ -3,6 +3,10 @@ package com.college.laballocation.faculty;
 import com.college.laballocation.academic.AcademicTerm;
 import com.college.laballocation.academic.AcademicTermService;
 import com.college.laballocation.academic.TermStatus;
+import com.college.laballocation.audit.AuditAction;
+import com.college.laballocation.audit.AuditEvent;
+import com.college.laballocation.audit.AuditLogService;
+import com.college.laballocation.audit.AuditResourceType;
 import com.college.laballocation.common.ApiException;
 import com.college.laballocation.common.ResourceNotFoundException;
 import com.college.laballocation.common.TimeIntervalUtils;
@@ -10,10 +14,12 @@ import com.college.laballocation.faculty.FacultyAvailabilityDtos.AvailabilityChe
 import com.college.laballocation.faculty.FacultyAvailabilityDtos.CreateFacultyAvailabilityRequest;
 import com.college.laballocation.faculty.FacultyAvailabilityDtos.FacultyAvailabilityResponse;
 import com.college.laballocation.faculty.FacultyAvailabilityDtos.UpdateFacultyAvailabilityRequest;
+import com.college.laballocation.user.UserRole;
 import java.time.DayOfWeek;
 import java.time.LocalTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -35,14 +41,17 @@ public class FacultyAvailabilityService {
     private final FacultyAvailabilityRepository availabilityRepository;
     private final FacultyService facultyService;
     private final AcademicTermService academicTermService;
+    private final AuditLogService auditLogService;
 
     public FacultyAvailabilityService(
             FacultyAvailabilityRepository availabilityRepository,
             FacultyService facultyService,
-            AcademicTermService academicTermService) {
+            AcademicTermService academicTermService,
+            AuditLogService auditLogService) {
         this.availabilityRepository = availabilityRepository;
         this.facultyService = facultyService;
         this.academicTermService = academicTermService;
+        this.auditLogService = auditLogService;
     }
 
     public List<FacultyAvailabilityResponse> list(Long facultyId, Long academicTermId, DayOfWeek dayOfWeek) {
@@ -63,7 +72,7 @@ public class FacultyAvailabilityService {
     }
 
     @Transactional
-    public FacultyAvailabilityResponse create(Long facultyId, CreateFacultyAvailabilityRequest request) {
+    public FacultyAvailabilityResponse create(Long facultyId, CreateFacultyAvailabilityRequest request, Long actingUserId) {
         Faculty faculty = requireActiveFaculty(facultyId);
         AcademicTerm term = requireUsableTerm(request.academicTermId());
         validateInterval(request.startTime(), request.endTime());
@@ -71,11 +80,13 @@ public class FacultyAvailabilityService {
 
         FacultyAvailability saved = availabilityRepository.save(
                 new FacultyAvailability(faculty, term, request.dayOfWeek(), request.startTime(), request.endTime()));
+        recordAvailabilityChange(actingUserId, faculty, term.getId(), request.dayOfWeek(), request.startTime(), request.endTime(), "CREATED");
         return FacultyAvailabilityResponse.from(saved);
     }
 
     @Transactional
-    public FacultyAvailabilityResponse update(Long facultyId, Long availabilityId, UpdateFacultyAvailabilityRequest request) {
+    public FacultyAvailabilityResponse update(
+            Long facultyId, Long availabilityId, UpdateFacultyAvailabilityRequest request, Long actingUserId) {
         FacultyAvailability availability = getOwnedEntity(facultyId, availabilityId);
         validateInterval(request.startTime(), request.endTime());
         rejectOverlap(
@@ -86,14 +97,30 @@ public class FacultyAvailabilityService {
                 request.endTime(),
                 availabilityId);
         availability.update(request.dayOfWeek(), request.startTime(), request.endTime());
+        recordAvailabilityChange(
+                actingUserId, availability.getFaculty(), availability.getAcademicTerm().getId(),
+                request.dayOfWeek(), request.startTime(), request.endTime(), "UPDATED");
         return FacultyAvailabilityResponse.from(availability);
     }
 
     /** Soft-deactivates (see {@link FacultyAvailability} javadoc for why this project chose deactivation over hard delete here). */
     @Transactional
-    public void remove(Long facultyId, Long availabilityId) {
+    public void remove(Long facultyId, Long availabilityId, Long actingUserId) {
         FacultyAvailability availability = getOwnedEntity(facultyId, availabilityId);
         availability.deactivate();
+        recordAvailabilityChange(
+                actingUserId, availability.getFaculty(), availability.getAcademicTerm().getId(),
+                availability.getDayOfWeek(), availability.getStartTime(), availability.getEndTime(), "DEACTIVATED");
+    }
+
+    private void recordAvailabilityChange(
+            Long actingUserId, Faculty faculty, Long academicTermId, DayOfWeek dayOfWeek, LocalTime start, LocalTime end, String operation) {
+        auditLogService.record(new AuditEvent(
+                actingUserId, UserRole.LAB_ASSISTANT, AuditAction.FACULTY_AVAILABILITY_CHANGED, AuditResourceType.FACULTY,
+                faculty.getId(), faculty.getEmployeeCode(), academicTermId, null,
+                Map.of(
+                        "facultyCode", faculty.getEmployeeCode(), "dayOfWeek", dayOfWeek.toString(),
+                        "startTime", start.toString(), "endTime", end.toString(), "operation", operation)));
     }
 
     /** Is {@code faculty} available for {@code [start, end)} on {@code dayOfWeek} within {@code academicTermId}? */

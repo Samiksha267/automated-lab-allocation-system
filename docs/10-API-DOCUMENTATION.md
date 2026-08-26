@@ -291,6 +291,15 @@ The full CRUD surface for `/api/faculty` (list/create/update) is documented unde
 | DELETE | `/api/cr-assignments/{id}` | LAB_ASSISTANT | End an assignment | `NOT_FOUND` |
 | GET | `/api/cr-assignments/me` | CR | Resolve my own current division | — |
 
+### `/api/users` — **implemented (Phase 20)**
+| Method | Path | Roles | Purpose |
+|---|---|---|---|
+| GET | `/api/users?role=` | LAB_ASSISTANT | List accounts of a given role (id/email/displayName/active) — added specifically so the CR-management UI can pick an existing CR account to assign (ADR-113, docs/15-DESIGN-DECISIONS.md) |
+
+Read-only — no account creation/registration endpoint exists in this project; accounts are seeded (`DevUserSeeder`), not created through this API.
+
+**Phase 21 (CR Frontend):** no new endpoints. The CR frontend is built entirely on pre-existing APIs — `/api/cr-assignments/me`, `/api/allocations/search`, `/api/extra-labs` (search/book/cancel, see below), `/api/schedule-versions` (published, read-only), `/api/divisions/{id}`. The `normalizedScore` field returned by `/api/allocations/search` is a `0.0-1.0` ratio, not a percentage — see ADR-118/Problem 13 in docs/14 and docs/15 for the display bug this caused and its fix.
+
 ### `/api/allocations/search` — candidate generation (used by both PDF-review correction UI and CR extra-lab flow)
 | Method | Path | Roles | Purpose | Key failure codes |
 |---|---|---|---|---|
@@ -311,36 +320,107 @@ The full CRUD surface for `/api/faculty` (list/create/update) is documented unde
 |---|---|---|---|
 | POST | `/api/schedules/generate` | LAB_ASSISTANT | Run backtracking scheduler over a set of unscheduled session requirements | `NO_VALID_ALLOCATION` (partial-failure report) |
 
-### `/api/schedule-versions`
-| Method | Path | Roles | Purpose |
-|---|---|---|---|
-| POST | `/api/schedule-versions` | LAB_ASSISTANT | Create new draft version for a term | — |
-| POST | `/api/schedule-versions/{id}/publish` | LAB_ASSISTANT | Publish (supersedes prior published version) | `INVALID_STATE_TRANSITION` |
-| GET | `/api/schedule-versions/current?termId=` | all | Get the currently published version | `NOT_FOUND` |
-
-### `/api/timetable-imports`
+### `/api/schedule-versions` — **implemented (Phase 18)**
 | Method | Path | Roles | Purpose | Key failure codes |
 |---|---|---|---|---|
-| POST | `/api/timetable-imports` | LAB_ASSISTANT | Upload PDF, triggers extraction pipeline | `VALIDATION_ERROR` |
-| GET | `/api/timetable-imports/{id}/entries` | LAB_ASSISTANT | List extracted entries with validation status | — |
-| PATCH | `/api/timetable-imports/{id}/entries/{entryId}` | LAB_ASSISTANT | Correct an entry's mapped fields, re-triggers validation | `VALIDATION_ERROR` |
-| POST | `/api/timetable-imports/{id}/approve` | LAB_ASSISTANT | Approve all valid entries → materialize as REGULAR allocations | `CONFLICT` (any entry still invalid) |
+| POST | `/api/schedule-versions` | LAB_ASSISTANT | Create the next `DRAFT` version for a term (`reason` required for every version after the first) | `VALIDATION_ERROR` |
+| POST | `/api/schedule-versions/{id}/publish` | LAB_ASSISTANT | Publish a `DRAFT`, atomically superseding the term's previous `PUBLISHED` version | `SCHEDULE_VERSION_NOT_FOUND`, `INVALID_SCHEDULE_VERSION_TRANSITION` (409 — not `DRAFT`) |
+| GET | `/api/schedule-versions?academicTermId=` | LAB_ASSISTANT | Full version history for a term, newest-first, each with its own allocation count | — |
+| GET | `/api/schedule-versions/{id}` | LAB_ASSISTANT | One version's metadata | `SCHEDULE_VERSION_NOT_FOUND` |
+| GET | `/api/schedule-versions/{id}/allocations?divisionId=&batchId=&subjectId=&facultyId=&labId=&date=&page=&size=` | LAB_ASSISTANT | That version's allocation rows, any status, paginated (`size` capped at 100) | `SCHEDULE_VERSION_NOT_FOUND` |
+
+`createdBy`/`publishedBy` are always the server-derived authenticated principal, never client-supplied. A `DRAFT` version always has `publishedBy: null`/`publishedAt: null`. Publishing a version that is not currently `DRAFT` (already `PUBLISHED`, or `SUPERSEDED`) is rejected with `409 INVALID_SCHEDULE_VERSION_TRANSITION` and an honest current-status message — never a raw `500` (see ADR-088/089, docs/15-DESIGN-DECISIONS.md, for two real bugs this exact scenario found and fixed live).
+
+### `/api/timetable` — **implemented (Phase 18; response enriched, batch semantics fixed in Phase 22)**
+| Method | Path | Roles | Purpose |
+|---|---|---|---|
+| GET | `/api/timetable?academicTermId=&divisionId=&batchId=&page=&size=` | STUDENT, CR, LAB_ASSISTANT | The term's current *published* timetable only — never a `DRAFT` or `SUPERSEDED` version's rows, and never `MAX(version_number)` (ADR-090) |
+
+Returns an empty page (`totalElements: 0`), not a `404`, when the term has no published version yet. Cancelled allocations are excluded. `academicTermId` is required; `divisionId`/`batchId` are optional filters — there is no server-side "student's own division" resolution (no `Student` enrollment entity exists in this project, ADR-122), so filtering works the same way for every role, via explicit query parameters that the frontend derives from the Program → Stream → Year → Division → Batch academic-hierarchy selectors, not sent as separate `programId`/`streamId`/`yearId` parameters.
+
+**`batchId` semantics (Phase 22, ADR-121):** when set, returns that batch's own rows **plus** every division-wide row (`batch IS NULL`) — not a strict `batch.id = batchId` equality. A batch-scoped request that hid division-wide practicals was a real gap found and fixed this phase; the Lab Assistant's `/api/schedule-versions/{id}/allocations` administrative listing intentionally keeps the strict equality, since an admin explicitly filtering by batch wants only that batch's rows.
+
+**`AllocationSummaryResponse` (Phase 22 additions, ADR-120):** each row now also includes `subjectName`, `labWing`, `labFloor`, `labRoomNumber` — added so the Student/CR timetable UI can show a subject's full name and a lab's actual location without an N+1 lookup per row; the fields were already loaded server-side to build the row.
+
+### `/api/timetable-imports` — **implemented (Phase 19)**
+| Method | Path | Roles | Purpose | Key failure codes |
+|---|---|---|---|---|
+| POST | `/api/timetable-imports?academicTermId=&scheduleVersionId=` (multipart `file`) | LAB_ASSISTANT | Upload a PDF; extraction/parsing/normalization/mapping/validation all run synchronously in this one request | `VALIDATION_ERROR`, `FILE_TOO_LARGE`, `UNSUPPORTED_PDF`, `SCHEDULE_VERSION_NOT_DRAFT` |
+| GET | `/api/timetable-imports?academicTermId=&scheduleVersionId=&status=&page=&size=` | LAB_ASSISTANT | Paginated import list, newest-first | — |
+| GET | `/api/timetable-imports/{importId}?page=&size=` | LAB_ASSISTANT | Import detail + summary counts + paginated staged rows | `TIMETABLE_IMPORT_NOT_FOUND` |
+| PATCH | `/api/timetable-imports/{importId}/rows/{rowId}` | LAB_ASSISTANT | Correct a row's already-resolved fields (`subjectId`/`facultyId`/`labId`/`divisionId`/`batchId`/`day`/`startTime`/`endTime`); re-validates the whole import | `TIMETABLE_IMPORT_NOT_EDITABLE` (409, once approved/rejected) |
+| POST | `/api/timetable-imports/{importId}/approve` | LAB_ASSISTANT | Atomic trust-boundary transition — re-validates against live state, creates `APPROVED` allocations inside the target `DRAFT` version | `TIMETABLE_IMPORT_HAS_ERRORS`, `SCHEDULE_VERSION_NOT_DRAFT`, `TIMETABLE_IMPORT_APPROVAL_CONFLICT` (409, concurrent conflicting approval) |
+| POST | `/api/timetable-imports/{importId}/reject` | LAB_ASSISTANT | Permanently discards a reviewable import (never re-approvable, never deleted) | `TIMETABLE_IMPORT_NOT_REJECTABLE` |
+
+See docs/18-PDF-IMPORT.md for the supported PDF format, the full pipeline, and the BDA/Cloudera failure-and-correction demo. Approval never publishes — see `/api/schedule-versions/{id}/publish` (Phase 18) for the separate, explicit step that makes imported allocations visible via `/api/timetable`.
 
 ### `/api/conflicts`
 | Method | Path | Roles | Purpose |
 |---|---|---|---|
 | GET | `/api/conflicts?divisionId=` | LAB_ASSISTANT (all), CR (own) | List currently detected conflicts + suggested alternatives |
 
-### `/api/audit-logs`
+### `/api/audit-logs` — **implemented (Phase 17)**
 | Method | Path | Roles | Purpose |
 |---|---|---|---|
-| GET | `/api/audit-logs?resourceType=&resourceId=` | LAB_ASSISTANT | Query audit trail |
-| GET | `/api/audit-logs/cr-activity?userId=` | LAB_ASSISTANT | CR-specific activity view |
+| GET | `/api/audit-logs?actorUserId=&action=&resourceType=&academicTermId=&divisionId=&from=&to=&page=&size=` | LAB_ASSISTANT | Paginated, filterable audit history — every filter is optional and combinable |
 
-### `/api/timetable` — student-facing read-only
-| Method | Path | Roles | Purpose |
-|---|---|---|---|
-| GET | `/api/timetable?programId=&streamId=&yearId=&divisionId=&batchId=` | STUDENT, CR | Published timetable, filtered |
+All filters are equality/range matches (`from`/`to` bound `createdAt`, an `Instant`). Default ordering is `createdAt DESC`; `size` defaults to 20 and is silently clamped to a maximum of 100 regardless of what is requested (ADR-082, docs/15-DESIGN-DECISIONS.md). Response is a standard Spring `Page<AuditLogResponse>`:
+
+```json
+{
+  "content": [
+    {
+      "id": 4,
+      "actorUserId": 2,
+      "actorDisplayName": "Demo CR",
+      "actorEmail": "cr@example.edu",
+      "actorRole": "CR",
+      "action": "EXTRA_LAB_BOOKED",
+      "resourceType": "ALLOCATION",
+      "resourceId": 81,
+      "resourceDisplay": "Lab C-202 2026-08-24 10:00-11:00",
+      "academicTermId": 1,
+      "divisionId": 1,
+      "metadata": { "labCode": "C-202", "subjectCode": "BDA", "startTime": "10:00", "endTime": "11:00" },
+      "createdAt": "2026-08-24T16:10:40.199254Z"
+    }
+  ],
+  "totalElements": 1, "totalPages": 1, "number": 0, "size": 20
+}
+```
+
+**Relationship to `GET /api/allocations/extra/activity` (Phase 15):** complementary, not overlapping — see ADR-085 (docs/15-DESIGN-DECISIONS.md). The Phase 15 endpoint reads live `Allocation` rows for one term (current status only); `/api/audit-logs` is the general-purpose, immutable historical record across every audited action type in the system, not just EXTRA bookings.
+
+### `/api/analytics/*` — **implemented (Phase 23)**
+
+Every endpoint below shares the same scope resolution: `academicTermId` (required), optional `from`/`to` (defaults to the term's own `startDate`/`endDate` if omitted; `to` before `from` → `400 VALIDATION_ERROR`). All are `LAB_ASSISTANT`-only — `403` for CR/STUDENT, `401` anonymous.
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/analytics/summary?academicTermId=&from=&to=` | One-screen summary: active allocations, extra-lab totals, overall utilization, unused-lab count |
+| GET | `/api/analytics/lab-utilization?academicTermId=&from=&to=&wing=` | Per-lab booked/available minutes + utilization percent, plus the weighted overall figure |
+| GET | `/api/analytics/unused-labs?academicTermId=&from=&to=&wing=` | The subset of active labs with zero qualifying allocations in scope |
+| GET | `/api/analytics/extra-labs?academicTermId=&from=&to=` | Total/active/cancelled extra-lab counts + breakdowns by division/subject/lab |
+| GET | `/api/analytics/peak-usage?academicTermId=&from=&to=` | Busiest day, most-used lab (by booked minutes, not count), busiest hourly time slot |
+| GET | `/api/analytics/conflicts?academicTermId=` | Always `evidenceAvailable: false` in this system today — see below |
+
+**Operational scope** (never `MAX(version_number)`, never DRAFT/SUPERSEDED, never CANCELLED): every query is scoped to the term's current `PUBLISHED` `ScheduleVersion`; if none exists, endpoints return a zero/empty response with `publishedVersionExists: false`, never an error and never fabricated non-zero data.
+
+**Numeric scales** (PART 82, explicit): every `*Percent` field is `0-100`, already server-rounded to one decimal — render with a trailing `%`, never re-scaled or multiplied again (the exact bug class ADR-118/Problem 13 found in Phase 21). Every `*Minutes` field is a plain integer minute count (`endTime - startTime` summed, in the college's own configured timezone — see `SchedulingTimeMapper`). `utilizationPercent`/`overallUtilizationPercent`/`cancellationRatePercent` are `null` — never `0` or `100` — when their denominator is zero (no basis to compute a percentage).
+
+**`utilizationPercent` example:**
+```json
+{
+  "labId": 5, "labCode": "B-301", "wing": "B", "capacity": 70, "labTypeCode": "COMPUTER",
+  "bookedMinutes": 180, "availableMinutes": 79200, "utilizationPercent": 0.2, "allocationCount": 2
+}
+```
+
+**Conflict analytics is deliberately, permanently empty in this system's current form** (ADR-127, docs/15-DESIGN-DECISIONS.md): no failed booking attempt or search-time rejection is ever persisted anywhere (the audit log records only successful state changes). `GET /api/analytics/conflicts` always returns:
+```json
+{ "academicTermId": 1, "evidenceAvailable": false, "categories": [], "explanation": "..." }
+```
+never an invented or partial category count. Similarly, `extra-labs`' `successfulBookings` is a real, countable figure, but `failedBookingDataAvailable` is always `false` (with `failedBookingDataUnavailableReason` explaining why) — this system cannot honestly compute a booking *success rate* because it never persists a failed attempt to divide by.
 
 ---
 

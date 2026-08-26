@@ -3,6 +3,7 @@ package com.college.laballocation.lab;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.when;
 
+import com.college.laballocation.audit.AuditLogService;
 import com.college.laballocation.common.ApiException;
 import com.college.laballocation.lab.LabEquipmentDtos.AssignLabEquipmentRequest;
 import com.college.laballocation.lab.LabSoftwareDtos.AddLabSoftwareRequest;
@@ -30,6 +31,9 @@ class LabCapabilityServiceTest {
     @Mock
     private LabEquipmentRepository labEquipmentRepository;
 
+    @Mock
+    private AuditLogService auditLogService;
+
     private LabCapabilityService service;
 
     private Lab lab() {
@@ -40,14 +44,14 @@ class LabCapabilityServiceTest {
     @Test
     void duplicateSoftwareAssignmentIsRejected() {
         service = new LabCapabilityService(
-                labService, softwareService, equipmentService, labSoftwareRepository, labEquipmentRepository);
+                labService, softwareService, equipmentService, labSoftwareRepository, labEquipmentRepository, auditLogService);
         Lab lab = lab();
         Software software = new Software("CLOUDERA", "Cloudera");
         when(labService.getEntity(1L)).thenReturn(lab);
         when(softwareService.getEntity(2L)).thenReturn(software);
         when(labSoftwareRepository.existsByLabIdAndSoftwareId(lab.getId(), software.getId())).thenReturn(true);
 
-        assertThatThrownBy(() -> service.addSoftware(1L, new AddLabSoftwareRequest(2L, null)))
+        assertThatThrownBy(() -> service.addSoftware(1L, new AddLabSoftwareRequest(2L, null), 1L))
                 .isInstanceOf(ApiException.class)
                 .hasFieldOrPropertyWithValue("code", "LAB_SOFTWARE_ALREADY_ASSIGNED");
     }
@@ -55,14 +59,14 @@ class LabCapabilityServiceTest {
     @Test
     void duplicateEquipmentAssignmentIsRejected() {
         service = new LabCapabilityService(
-                labService, softwareService, equipmentService, labSoftwareRepository, labEquipmentRepository);
+                labService, softwareService, equipmentService, labSoftwareRepository, labEquipmentRepository, auditLogService);
         Lab lab = lab();
         Equipment equipment = new Equipment("ROUTER", "Router", null);
         when(labService.getEntity(1L)).thenReturn(lab);
         when(equipmentService.getEntity(3L)).thenReturn(equipment);
         when(labEquipmentRepository.existsByLabIdAndEquipmentId(lab.getId(), equipment.getId())).thenReturn(true);
 
-        assertThatThrownBy(() -> service.assignEquipment(1L, new AssignLabEquipmentRequest(3L, 5)))
+        assertThatThrownBy(() -> service.assignEquipment(1L, new AssignLabEquipmentRequest(3L, 5), 1L))
                 .isInstanceOf(ApiException.class)
                 .hasFieldOrPropertyWithValue("code", "LAB_EQUIPMENT_ALREADY_ASSIGNED");
     }

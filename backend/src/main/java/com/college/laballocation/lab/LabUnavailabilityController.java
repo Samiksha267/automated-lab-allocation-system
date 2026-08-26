@@ -40,7 +40,7 @@ public class LabUnavailabilityController {
 
     @DeleteMapping("/{unavailabilityId}")
     @PreAuthorize("hasRole('LAB_ASSISTANT')")
-    public void remove(@PathVariable Long labId, @PathVariable Long unavailabilityId) {
-        unavailabilityService.remove(unavailabilityId);
+    public void remove(@PathVariable Long labId, @PathVariable Long unavailabilityId, @AuthenticationPrincipal Long userId) {
+        unavailabilityService.remove(unavailabilityId, userId);
     }
 }

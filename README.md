@@ -1,10 +1,18 @@
 # Automated Constraint-Based Lab Allocation and Scheduling System
 
+[![CI](https://github.com/Samiksha267/automated-lab-allocation-system/actions/workflows/ci.yml/badge.svg)](https://github.com/Samiksha267/automated-lab-allocation-system/actions/workflows/ci.yml)
+
 A constraint-based lab scheduling engine for a college's multi-program academic structure — not a lab-booking CRUD app. See [docs/01-PROJECT-OVERVIEW.md](docs/01-PROJECT-OVERVIEW.md) for the full problem statement and motivation.
 
 ## Current Status
 
-**Phase 2 of 30 complete: Project Foundation.** Repository scaffolding, backend/frontend projects, Docker setup, and baseline testing are in place and verified. **No domain logic, authentication, or scheduling engine exists yet** — do not expect labs, allocations, or dashboards to work. See the phase-by-phase build plan referenced in project docs for what's next (Phase 3: Authentication + RBAC).
+**Phase 27 of 30 complete: CI/CD.** Authentication/RBAC, the full scheduling/constraint engine, extra-lab booking with concurrency protection, audit logging, timetable versioning, PDF import, Lab Assistant/CR/Student frontends, analytics, a production-ready Docker Compose deployment, and a GitHub Actions pipeline verifying every push/PR are all implemented — see [docs/12-DEPLOYMENT-GUIDE.md](docs/12-DEPLOYMENT-GUIDE.md) for how to run it and [docs/11-TESTING-STRATEGY.md](docs/11-TESTING-STRATEGY.md) for how CI verifies it.
+
+## CI
+
+Every push and pull request against `main` runs [`.github/workflows/ci.yml`](.github/workflows/ci.yml): backend compile → unit tests → Testcontainers-backed integration tests, frontend `npm ci` → lint → test → build (in parallel with the backend), then a Docker job that builds both production images and boots the real Compose stack (`prod` profile) as a smoke test. See docs/11-TESTING-STRATEGY.md's "Phase 27 — CI Verification" section for the full breakdown.
+
+**Recommended branch protection** (not configured through code — a repository setting, applied by a maintainer with admin access): require a pull request before merging to `main`, and require the `Backend`, `Frontend`, and `Docker` CI checks to pass before merge is allowed.
 
 ## Architecture
 
@@ -92,3 +100,5 @@ See [docs/11-TESTING-STRATEGY.md](docs/11-TESTING-STRATEGY.md) for the full test
 ## Documentation
 
 Full documentation lives in [docs/](docs/), including requirements, database design, the scheduling engine design, hard constraints, RBAC, API contracts, ADRs, and more. Start with [docs/01-PROJECT-OVERVIEW.md](docs/01-PROJECT-OVERVIEW.md).
+
+Presenting this project? [docs/17-DEMO-SCENARIOS.md](docs/17-DEMO-SCENARIOS.md) has ready-to-run 3/10/15-minute scripts and 12 live-verified proof scenarios.

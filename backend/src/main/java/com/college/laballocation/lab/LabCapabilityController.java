@@ -8,6 +8,7 @@ import com.college.laballocation.lab.LabSoftwareDtos.AddLabSoftwareRequest;
 import jakarta.validation.Valid;
 import java.util.List;
 import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
@@ -34,14 +35,15 @@ public class LabCapabilityController {
 
     @PostMapping("/software")
     @PreAuthorize("hasRole('LAB_ASSISTANT')")
-    public InstalledSoftwareItem addSoftware(@PathVariable Long labId, @Valid @RequestBody AddLabSoftwareRequest request) {
-        return capabilityService.addSoftware(labId, request);
+    public InstalledSoftwareItem addSoftware(
+            @PathVariable Long labId, @Valid @RequestBody AddLabSoftwareRequest request, @AuthenticationPrincipal Long userId) {
+        return capabilityService.addSoftware(labId, request, userId);
     }
 
     @DeleteMapping("/software/{softwareId}")
     @PreAuthorize("hasRole('LAB_ASSISTANT')")
-    public void removeSoftware(@PathVariable Long labId, @PathVariable Long softwareId) {
-        capabilityService.removeSoftware(labId, softwareId);
+    public void removeSoftware(@PathVariable Long labId, @PathVariable Long softwareId, @AuthenticationPrincipal Long userId) {
+        capabilityService.removeSoftware(labId, softwareId, userId);
     }
 
     @GetMapping("/equipment")
@@ -51,20 +53,24 @@ public class LabCapabilityController {
 
     @PostMapping("/equipment")
     @PreAuthorize("hasRole('LAB_ASSISTANT')")
-    public InstalledEquipmentItem assignEquipment(@PathVariable Long labId, @Valid @RequestBody AssignLabEquipmentRequest request) {
-        return capabilityService.assignEquipment(labId, request);
+    public InstalledEquipmentItem assignEquipment(
+            @PathVariable Long labId, @Valid @RequestBody AssignLabEquipmentRequest request, @AuthenticationPrincipal Long userId) {
+        return capabilityService.assignEquipment(labId, request, userId);
     }
 
     @PatchMapping("/equipment/{equipmentId}")
     @PreAuthorize("hasRole('LAB_ASSISTANT')")
     public InstalledEquipmentItem updateEquipmentQuantity(
-            @PathVariable Long labId, @PathVariable Long equipmentId, @Valid @RequestBody UpdateLabEquipmentQuantityRequest request) {
-        return capabilityService.updateEquipmentQuantity(labId, equipmentId, request.quantity());
+            @PathVariable Long labId,
+            @PathVariable Long equipmentId,
+            @Valid @RequestBody UpdateLabEquipmentQuantityRequest request,
+            @AuthenticationPrincipal Long userId) {
+        return capabilityService.updateEquipmentQuantity(labId, equipmentId, request.quantity(), userId);
     }
 
     @DeleteMapping("/equipment/{equipmentId}")
     @PreAuthorize("hasRole('LAB_ASSISTANT')")
-    public void removeEquipment(@PathVariable Long labId, @PathVariable Long equipmentId) {
-        capabilityService.removeEquipment(labId, equipmentId);
+    public void removeEquipment(@PathVariable Long labId, @PathVariable Long equipmentId, @AuthenticationPrincipal Long userId) {
+        capabilityService.removeEquipment(labId, equipmentId, userId);
     }
 }

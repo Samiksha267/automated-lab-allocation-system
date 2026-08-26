@@ -25,7 +25,7 @@ services:
       DB_USER: ${POSTGRES_USER:-lab_user}
       DB_PASSWORD: ${POSTGRES_PASSWORD:-change_me}
       SERVER_PORT: 8080
-      SPRING_PROFILES_ACTIVE: dev
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-dev}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:5173}
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env - see .env.example}
       JWT_EXPIRATION_MINUTES: ${JWT_EXPIRATION_MINUTES:-60}

@@ -17,6 +17,8 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.context.request.WebRequest;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
+import org.springframework.web.multipart.MaxUploadSizeExceededException;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExceptionHandler;
 
 /**
@@ -36,6 +38,45 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
     public ResponseEntity<ApiErrorResponse> handleApiException(ApiException ex) {
         return ResponseEntity.status(ex.getStatus())
                 .body(ApiErrorResponse.of(ex.getCode(), ex.getMessage(), ex.getDetails()));
+    }
+
+    /**
+     * A query parameter that fails Spring's own type conversion (e.g.
+     * {@code ?action=NOT_A_REAL_ACTION} against an enum-typed
+     * {@code @RequestParam}) is a client input error, not a server fault -
+     * without this handler it would fall through to the generic 500 handler
+     * below (Phase 17's audit-activity filters were the first place this
+     * project actually needed enum-typed query parameters and surfaced the
+     * gap). Applies to any endpoint with an enum/typed {@code @RequestParam},
+     * not only audit logs.
+     */
+    @ExceptionHandler(MethodArgumentTypeMismatchException.class)
+    public ResponseEntity<ApiErrorResponse> handleTypeMismatch(MethodArgumentTypeMismatchException ex) {
+        return ResponseEntity.badRequest()
+                .body(ApiErrorResponse.of(
+                        "VALIDATION_ERROR",
+                        "Invalid value for parameter '" + ex.getName() + "'.",
+                        Map.of(ex.getName(), String.valueOf(ex.getValue()))));
+    }
+
+    /**
+     * Spring's own multipart size limit (application.yml, PART 11/45) - a
+     * client error, never the generic 500. An {@code @ExceptionHandler}
+     * method for this exact exception type is rejected at startup
+     * ({@code IllegalStateException: Ambiguous @ExceptionHandler method}) -
+     * a real bug found live in Docker (never surfaced by any unit test,
+     * since none builds the full {@code DispatcherServlet} MVC
+     * infrastructure) - because {@link ResponseEntityExceptionHandler}
+     * itself already declares a protected handler for this type in this
+     * Spring version; overriding it (matching the existing
+     * {@code handleMethodArgumentNotValid}/{@code handleHttpMessageNotReadable}
+     * pattern below) is the correct hook, not a competing {@code @ExceptionHandler}.
+     */
+    @Override
+    protected ResponseEntity<Object> handleMaxUploadSizeExceededException(
+            MaxUploadSizeExceededException ex, HttpHeaders headers, HttpStatusCode status, WebRequest request) {
+        return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE)
+                .body(ApiErrorResponse.of("FILE_TOO_LARGE", "The uploaded file exceeds the maximum allowed size."));
     }
 
     @ExceptionHandler(ConstraintViolationException.class)

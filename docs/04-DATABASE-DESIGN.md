@@ -296,23 +296,54 @@ Each partial predicate mirrors `AllocationStatus.blocksScheduling()` exactly - a
 
 ---
 
-## 8. PDF Import
+## 8. PDF Import — **implemented (Phase 19, Flyway `V14__create_timetable_import.sql`)**
+
+Staging tables, completely separate from `allocation` - never a source of truth for confirmed scheduling data (docs/18-PDF-IMPORT.md, ADR-097-107 in docs/15-DESIGN-DECISIONS.md).
+
+```text
+timetable_import
+      |
+      +-- timetable_import_row[]      (raw + normalized + mapped + validation state)
+              |
+              | approval (TimetableImportService.approve, atomic)
+              v
+          allocation                  (status = APPROVED, source_import_id set)
+              |
+              | Phase 18 publication (unmodified, separate)
+              v
+          schedule_version (PUBLISHED)
+```
 
 ### `timetable_import`
-**Key fields:** `id`, `academic_term_id`, `uploaded_by`, `uploaded_at`, `file_reference`, `status` (`UPLOADED`|`PARSED`|`UNDER_REVIEW`|`APPROVED`|`REJECTED`).
+**Key fields:** `id`, `academic_term_id`, `schedule_version_id` (the target `DRAFT` version), `original_filename`, `file_size_bytes`, `file_hash` (SHA-256, indexed - traceability/future dedup, ADR-107), `status` (`UPLOADED`\|`NEEDS_REVIEW`\|`VALIDATED`\|`APPROVED`\|`REJECTED`\|`FAILED`, CHECK-constrained), `failure_reason`, `uploaded_by`/`uploaded_at`, `approved_by`/`approved_at` (both null for a non-approved import).
 
-### `timetable_import_entry`
-**Why separate from `allocation`:** PDF extraction is unreliable (ADR-007); an entry must be correctable and re-validated before it ever becomes a real, conflict-checked `allocation` row.
-**Key fields:** `id`, `timetable_import_id`, `raw_extracted_data` (the as-extracted values: subject text, faculty text, lab text, time text — kept for audit/debugging of the parser), `corrected_subject_id`, `corrected_faculty_id`, `corrected_lab_id`, `corrected_division_id`, `corrected_batch_id`, `corrected_date`, `corrected_start_time`, `corrected_end_time`, `validation_status` (`PENDING`|`VALID`|`CONFLICT`), `conflict_details` (nullable text/JSON explaining why), `resulting_allocation_id` (nullable FK, set once approved and materialized into `allocation`).
+### `timetable_import_row`
+**Why separate from `allocation`** (PART 6 of the phase brief): PDF extraction is unreliable; a row must be reviewable, correctable, and re-validated before it can ever become a real, conflict-checked `allocation` row. `UNIQUE (timetable_import_id, row_number)`.
+**Raw values** (`raw_day`, `raw_start_time`, `raw_end_time`, `raw_subject`, `raw_faculty`, `raw_lab`, `raw_division`, `raw_batch`) are preserved forever, never overwritten by normalization/mapping/correction - see `corrected` below instead.
+**Normalized/mapped values:** `normalized_day`, `normalized_start_time`/`normalized_end_time` (`TIME`), `subject_id`/`faculty_id`/`lab_id`/`division_id`/`batch_id` (nullable FKs - unresolved, never auto-created), `allocation_date` (the concrete date this row would occupy, ADR-099).
+**Validation state:** `validation_status` (`VALID`\|`WARNING`\|`ERROR`, CHECK-constrained), `validation_messages` (`JSONB`, an array of `{severity, code, message, details}` - the same explainability shape Phase 12 established, never a bare string).
+**`corrected`** (`BOOLEAN`) - `true` once a Lab Assistant has manually corrected this row's mapped fields.
+
+### `allocation.source_import_id` (added by this migration, nullable FK to `timetable_import`)
+Traceability (ADR-105): which PDF import, if any, produced a confirmed allocation. `null` for every EXTRA booking and any pre-Phase-19 row. Partial index (`WHERE source_import_id IS NOT NULL`) keeps it cheap for the common (EXTRA) case.
+
+### `audit_log` CHECK constraints extended (same migration, not V12/V13)
+Adds `TIMETABLE_IMPORT_UPLOADED`/`TIMETABLE_IMPORT_APPROVED`/`TIMETABLE_IMPORT_REJECTED` and resource type `TIMETABLE_IMPORT` - a new migration widening the constraint, per the established V13 precedent (Flyway migrations already applied to a real environment are never edited).
 
 ---
 
-## 9. Audit
+## 9. Audit — **implemented (Phase 17, Flyway `V12__create_audit_log.sql`)**
 
 ### `audit_log`
-**Key fields:** `id`, `actor_user_id`, `actor_role`, `action` (enum/string, e.g. `EXTRA_LAB_CREATED`), `resource_type`, `resource_id`, `metadata` (JSONB — the one deliberate use of a flexible column in this schema, since audit metadata shape genuinely varies per action type and is never queried relationally, only displayed), `created_at`.
-**Append-only:** no UPDATE/DELETE path exists in application code (ADR — see design decisions).
-**Indexes:** `(resource_type, resource_id)` for "history of this allocation," `(actor_user_id)` for "this CR's activity."
+**Key fields:** `id` (`IDENTITY`), `actor_user_id` (FK → `app_user`, `NOT NULL`), `actor_role` (snapshot at the time of the action — see ADR-081, docs/15-DESIGN-DECISIONS.md), `action` (`VARCHAR(64)`, CHECK-constrained to the 11 `AuditAction` values — see ADR-076), `resource_type`/`resource_id` (`VARCHAR(32)` CHECK-constrained + `BIGINT`, the affected entity), `resource_display` (nullable human-readable label, e.g. `"Lab C-202 2026-08-24 10:00-11:00"`), `academic_term_id`/`division_id` (nullable FKs — populated only when the action genuinely has that scope; admin actions like `LAB_CREATED` leave both `NULL`), `metadata` (`JSONB NOT NULL DEFAULT '{}'`, small non-sensitive per-action detail — see ADR-080), `created_at` (`TIMESTAMPTZ NOT NULL DEFAULT now()`, never updatable).
+
+**Never a source of truth for current state:** `Allocation.status`, `CrAssignment.status`, etc. remain authoritative; `audit_log` only ever records that a transition happened.
+
+**Append-only, enforced at two layers:**
+- *Application:* no setter on `AuditLog` beyond its constructor, no repository update/delete method, no controller mutation endpoint, and the entity is annotated Hibernate `@Immutable` (never dirty-checked/re-persisted once loaded).
+- *Database:* `trg_audit_log_prevent_update`/`trg_audit_log_prevent_delete` (`BEFORE UPDATE OR DELETE` triggers calling `audit_log_prevent_update_delete()`) unconditionally reject any `UPDATE`/`DELETE` against the table, from any source — proven directly via `psql` (see docs/11-TESTING-STRATEGY.md). See ADR-079 (docs/15-DESIGN-DECISIONS.md) for why both layers exist.
+
+**Indexes:** `idx_audit_log_created_at (created_at DESC)` (default newest-first listing/date-range filter), `idx_audit_log_actor (actor_user_id)`, `idx_audit_log_action (action)`, `idx_audit_log_resource (resource_type, resource_id)`, plus two partial composites — `idx_audit_log_term_created`/`idx_audit_log_division_created` (`WHERE ... IS NOT NULL`) — for the two scope filters a Lab Assistant narrows activity by most often, each pre-sorted for the default ordering within that scope.
 
 ---
 
@@ -372,6 +403,12 @@ This matches §3/§5 of [03-SYSTEM-ARCHITECTURE.md](03-SYSTEM-ARCHITECTURE.md) e
 **Implementation status against this diagram (Phase 8):** `PROGRAM`, `STREAM`, `ACADEMIC_YEAR`, `DIVISION`, `BATCH`, `ACADEMIC_TERM`, `SUBJECT`, `FACULTY`, `SUBJECT_FACULTY_ASSIGNMENT`, `CR_ASSIGNMENT`, `APP_USER` (Phase 4); `LAB_TYPE`, `LAB`, `SOFTWARE`, `EQUIPMENT`, `LAB_SOFTWARE`, `LAB_EQUIPMENT`, `LAB_UNAVAILABILITY` (Phase 5); `SUBJECT_SOFTWARE_REQUIREMENT`, `SUBJECT_EQUIPMENT_REQUIREMENT`, `subject.required_lab_type_id`/`preferred_lab_type_id` (Phase 6); `FACULTY_AVAILABILITY` (Phase 7); `SCHEDULE_VERSION`, `ALLOCATION` (Phase 8) are all real, migrated tables/columns. Everything else in this diagram (`TIMETABLE_IMPORT*`, `AUDIT_LOG`) remains the Phase 1 plan, not yet implemented — Phase 19+ per the roadmap. No `SchedulingConstraint` reads or writes `ALLOCATION` yet (Phase 9+); Phase 8 only establishes the table and its query infrastructure.
 
 ---
+
+## 10a. Analytics — **implemented (Phase 23, no migration)**
+
+Phase 23 adds **no new tables, columns, indexes, or constraints**. Every analytics figure is derived at query time from the existing source-of-truth tables (`allocation`, `schedule_version`, `lab`, `lab_unavailability`, `division`, `subject`) via `AnalyticsRepository`'s native aggregate queries (`GROUP BY`/`SUM`/`COUNT ... FILTER`) - see docs/03-SYSTEM-ARCHITECTURE.md §31. No analytics snapshot/materialized table was introduced; every request recomputes from live data, which is deliberate (docs/15-DESIGN-DECISIONS.md ADR-124-130) rather than a performance shortcut, since this phase's own manual verification never observed a query pattern that needed one.
+
+**Index review (PART 48):** the queries filter on `schedule_version_id`, `status`, `allocation_type`, and `allocation_date` (all already present, unindexed beyond the table's existing primary/foreign keys) and group by `lab_id`/`division_id`/`subject_id` via joins on their respective primary keys. At this project's data scale (a single term's worth of scheduled sessions, observed in the tens during live verification), sequential scans over `allocation` are not a demonstrated problem - no index was added speculatively. If a future phase's benchmarking (Phase 25) finds a real bottleneck, a composite index on `(schedule_version_id, status, allocation_date)` is the most likely candidate, since every analytics query filters on exactly that combination.
 
 ## 11. Cross-reference to ASSUMPTIONS
 

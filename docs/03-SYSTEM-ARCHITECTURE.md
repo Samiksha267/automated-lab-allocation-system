@@ -979,3 +979,316 @@ Per the phase brief's explicit constraints: no `synchronized`/`ReentrantLock`/st
 ### Verified end-to-end (Dockerized, 2026-08-24)
 
 Live, true-parallel HTTP races (`curl` requests launched as background processes and `wait`ed together, never sequential) against the real Dockerized stack: same-lab race (cross-division, to bypass the division lock and genuinely exercise the exclusion constraint) - repeated 5 times, always exactly one `200`/one `409`, confirmed hitting both the exclusion-constraint path and the deadlock path across the runs; same-faculty race and same-batch race (both caught via the division lock's serialized app-level revalidation); DIVISION-vs-BATCH race in both launch-order directions - always exactly one winner; A1/A2 concurrent booking - both succeeded; three-way contention on one lab - exactly one success, two conflicts; adjacent intervals - both succeeded; a cancelled allocation freeing its slot for an immediate rebooking; same-CR double-submit - exactly one active row; double-cancel on the same allocation - exactly one lifecycle transition applied, the second cleanly rejected; cancel-vs-book race - always exactly one active row regardless of which won. A final diagnostic query across every scenario's rows confirmed zero lab/faculty/batch overlaps and zero invalid DIVISION/BATCH overlaps. Every temporary fixture (a second division/CR/subjects/faculty created specifically to test cross-division racing) was deleted afterward, confirmed by the dev-seed state matching its exact pre-phase baseline.
+
+## 25. Phase 17 — Immutable Audit Logging (implemented)
+
+Adds a cross-cutting, append-only historical record of "who did what, to what, when" for the state-changing actions this project's requirements call for (FR-32/FR-33) - layered on top of every phase from 4 through 16 without changing any of their existing behavior.
+
+### Flow (every audited mutation)
+
+```mermaid
+flowchart TD
+    Req[Controller: @AuthenticationPrincipal userId] --> Svc["Business service method (@Transactional)"]
+    Svc --> Mut[Perform the business mutation - unchanged from prior phases]
+    Mut --> Audit["AuditLogService.record(AuditEvent) - same transaction, default REQUIRED propagation"]
+    Audit --> Repo[AuditLogRepository.save]
+    Repo --> DB[(audit_log - append-only:\napplication has no update/delete path,\nentity is Hibernate @Immutable,\nDB trigger rejects UPDATE/DELETE)]
+    Svc -->|any failure, before or after the audit call| Rollback[Transaction rolls back - business change AND audit row both undone]
+```
+
+Controllers stay thin (PART 23 of the phase brief): they resolve the authenticated principal and delegate; every business service - never a controller - decides what to audit and calls `AuditLogService.record(...)` itself, from inside its own existing `@Transactional` method. No controller anywhere calls `AuditLogRepository`/`AuditLogService` directly except `AuditLogController`'s own read-only `search`.
+
+### Why actor identity never touches the request body
+
+Every audited service method receives its acting user's id the same way every ownership/authorization check in this project already does - `@AuthenticationPrincipal Long userId` in the controller, threaded down as an explicit parameter (`ExtraLabService.book(userId, ...)`, `CrAssignmentService.create(request, actingLabAssistantUserId)`, etc.). No DTO anywhere carries a `performedBy`/`actorId` field; trusting one would let any authenticated caller forge history under someone else's name (ADR-077, docs/15-DESIGN-DECISIONS.md).
+
+### Why this doesn't reintroduce the Phase 16 concurrency risk
+
+`AuditLogService.record` performs one `INSERT`, nothing else - it never reads or locks any row `ExtraLabService.book`'s exclusion-constraint/division-lock logic depends on, and it runs inside the same transaction that logic already controls (not a new, separate one). Verified live: the Phase 16 concurrent-booking race re-run after this phase still produces exactly one success/one conflict, with the audit trail correctly reflecting only the actual winner (docs/11-TESTING-STRATEGY.md).
+
+### New/changed backend (Phase 17)
+
+```
+backend/src/main/resources/db/migration/V12__create_audit_log.sql   (new - table, indexes, append-only trigger)
+com.college.laballocation.audit.*                                    (new package - AuditAction, AuditResourceType,
+                                                                       AuditLog, AuditEvent, AuditLogRepository,
+                                                                       AuditLogSpecifications, AuditLogDtos,
+                                                                       AuditLogService, AuditLogController)
+com.college.laballocation.scheduling.extra.ExtraLabService           book()/cancel() record EXTRA_LAB_BOOKED/CANCELLED
+com.college.laballocation.academic.CrAssignmentService               create()/end() record CR_ASSIGNED/CR_ASSIGNMENT_ENDED
+com.college.laballocation.lab.LabService                             create()/update() record LAB_CREATED/UPDATED
+com.college.laballocation.lab.LabCapabilityService                   software/equipment mutations record LAB_SOFTWARE/EQUIPMENT_CHANGED
+com.college.laballocation.lab.LabUnavailabilityService                create()/remove() record LAB_UNAVAILABILITY_CHANGED
+com.college.laballocation.faculty.FacultyAvailabilityService         create()/update()/remove() record FACULTY_AVAILABILITY_CHANGED
+com.college.laballocation.subject.SubjectRequirementService          7 mutation methods record SUBJECT_REQUIREMENTS_CHANGED
+com.college.laballocation.common.GlobalExceptionHandler              + MethodArgumentTypeMismatchException -> 400 (general fix,
+                                                                       needed once /api/audit-logs took typed enum query params)
+```
+
+### Verified end-to-end (Dockerized, 2026-08-24)
+
+Booked and cancelled a real EXTRA allocation as the demo CR, confirmed both `EXTRA_LAB_BOOKED` and `EXTRA_LAB_CANCELLED` rows via `GET /api/audit-logs` as the demo Lab Assistant; confirmed a rejected (409) booking attempt produced no audit row; confirmed RBAC (LAB_ASSISTANT 200 / CR 403 / STUDENT 403 / anonymous 401) and the page-size cap (`?size=500` -> `100`) against the live backend; confirmed the V12 trigger directly via `psql` (`UPDATE`/`DELETE` both rejected, row unchanged); re-ran the Phase 16 concurrent-booking race live and confirmed it still holds. Found and fixed one real bug this way - see docs/15-DESIGN-DECISIONS.md ADR-078 and docs/11-TESTING-STRATEGY.md.
+
+## 26. Phase 18 — Timetable Versioning, Publication Lifecycle & Historical Preservation (implemented)
+
+Completes the `ScheduleVersion` lifecycle Phase 8 introduced but never exposed: draft creation, atomic/concurrency-safe publication with automatic superseding, version history, per-version allocation inspection, and student/CR visibility strictly scoped to the current `PUBLISHED` version. No new domain model - `ScheduleVersion`/`ScheduleVersionStatus`/`Allocation.scheduleVersionId` and both Phase 8 database invariants (`uq_schedule_version_term_number`, `uq_schedule_version_one_published_per_term`) are reused unchanged.
+
+```text
+AcademicTerm
+     |
+     +-- ScheduleVersion V1 -- SUPERSEDED
+     |       +-- allocations... (preserved forever)
+     |
+     +-- ScheduleVersion V2 -- SUPERSEDED
+     |       +-- allocations... (preserved forever)
+     |
+     +-- ScheduleVersion V3 -- PUBLISHED   <-- students/CRs see exactly this one
+     |       +-- allocations...
+     |
+     +-- ScheduleVersion V4 -- DRAFT       <-- Lab-Assistant-only, invisible to students
+             +-- allocations... (or none yet)
+```
+
+### Publication flow
+
+```mermaid
+flowchart TD
+    Req["POST /api/schedule-versions/{id}/publish"] --> TermId["ScheduleVersionRepository.findAcademicTermIdById (scalar-only, no entity load yet)"]
+    TermId --> Lock["AcademicTermRepository.lockById - per-term pessimistic lock (new, Phase 18, mirrors ADR-073)"]
+    Lock --> Load["getEntity(versionId) - first real load in this transaction, guaranteed fresh post-lock"]
+    Load --> Guard["version.status == DRAFT? (ADR-089 - checked BEFORE the existing-published lookup)"]
+    Guard -->|no| Reject["409 INVALID_SCHEDULE_VERSION_TRANSITION"]
+    Guard -->|yes| Find["findByAcademicTermIdAndStatus(term, PUBLISHED)"]
+    Find -->|found| Supersede["existing.supersede() + flush (ADR-088) + audit SCHEDULE_SUPERSEDED"]
+    Find -->|none| Publish
+    Supersede --> Publish["version.publish(publishedBy)"]
+    Publish --> Promote["APPROVED allocations of this version -> PUBLISHED (Allocation.publish(), ADR-091)"]
+    Promote --> Audit["audit SCHEDULE_PUBLISHED"]
+    Audit --> Commit["commit - one transaction, atomic"]
+```
+
+### Student/CR timetable path (separate controller, separate guarantee)
+
+```text
+Student / CR
+   |
+GET /api/timetable?academicTermId=&divisionId=&batchId=
+   |
+AllocationSpecifications.currentlyPublishedForTerm
+   (joins ScheduleVersion.status = PUBLISHED - never MAX(version_number), ADR-090)
+   + activeStatus (excludes CANCELLED)
+   |
+Allocations of exactly one version - the current one
+```
+
+### Lab Assistant history path (different controller, any status)
+
+```text
+Lab Assistant
+   |
+GET /api/schedule-versions?academicTermId=      (every version, any status, newest-first)
+GET /api/schedule-versions/{id}                 (one version's metadata)
+GET /api/schedule-versions/{id}/allocations     (that version's rows, any status, filtered/paginated)
+```
+
+### Two real bugs found live, both fixed (ADR-088/089, docs/15-DESIGN-DECISIONS.md)
+
+Neither concurrency-related - both were single-request, zero-race logic bugs the partial unique index (`uq_schedule_version_one_published_per_term`) correctly caught: (1) Hibernate's flush ordering for two `ScheduleVersion` updates in one transaction followed *load* order, not *mutation* order, briefly asserting two simultaneously-`PUBLISHED` rows for one term on an entirely ordinary publish - fixed with an explicit `flush()` between the supersede and the publish; (2) publishing an already-`PUBLISHED` version made the "find the current published version" lookup return that same row, which then superseded itself in memory before being rejected with a misleading status message - fixed with an up-front `DRAFT`-only guard that runs before that lookup can ever execute.
+
+### Verified end-to-end (Dockerized, 2026-08-24)
+
+Full lifecycle live: created and published the demo term's V2, verified the student timetable correctly kept showing V1 while V2 was still `DRAFT`, then correctly switched to V2 (initially empty - ADR-093) the instant it was published, with V1 flipping to `SUPERSEDED` and all of V1's allocations (and V1 itself) still present in the database and via the Lab-Assistant history/allocations endpoints. Re-ran the Phase 16 concurrent-booking race against the new current version - still exactly one winner, one `409`. Re-ran the Phase 17 immutability trigger directly via `psql` - `UPDATE`/`DELETE` on `audit_log` still both rejected. Confirmed the mandatory concurrent-publication invariant with two genuinely parallel `POST .../publish` requests for two different drafts of the same term (background `curl`, `wait`-joined): both returned `200`, and the final state showed exactly one `PUBLISHED` version for the term, the other correctly `SUPERSEDED` - never two. Confirmed a superseded EXTRA allocation can no longer be cancelled (`409 SCHEDULE_VERSION_NOT_CURRENT`).
+
+## 27. Phase 19 — PDF Timetable Import Pipeline (implemented)
+
+Untrusted PDF -&gt; staging -&gt; review/correction -&gt; the explicit approval trust boundary -&gt; `Allocation` rows inside a `DRAFT` `ScheduleVersion` -&gt; the unmodified Phase 18 publication workflow. See docs/18-PDF-IMPORT.md for the full pipeline, supported format, and demo scenario; docs/15-DESIGN-DECISIONS.md ADR-097-107 for every decision's reasoning.
+
+```text
+PDF (multipart upload)
+    |
+PdfTextExtractor (Apache PDFBox 3.0.3 - text only, never renders/executes anything)
+    |
+TimetableParser (pipe-delimited lines -> ParsedTimetableRow, pure/JPA-free)
+    |
+TimetableNormalizer (day/time/token - null on anything ambiguous, never guessed)
+    |
+TimetableMappingService (SubjectFacultyAssignment + Lab.code - never auto-creates an entity)
+    |
+TimetableImportValidationService
+    |   reuses the UNMODIFIED Phase 9-14 pipeline per row:
+    |   SchedulingContextFactory -> CandidateAllocationFactory -> ConstraintEngine
+    |   + a small cross-row pass (TimeIntervalUtils.overlaps) for same-import conflicts
+    v
+timetable_import / timetable_import_row (staging - never allocation)
+    |
+review / correction (Lab Assistant) --revalidates the whole import, PART 29--
+    |
+================ APPROVAL - the trust boundary ================
+    |   TimetableImportService.approve:
+    |     lock import -> re-verify target version still DRAFT -> revalidate ALL rows
+    |     against CURRENT live state -> persist Allocation rows (one saveAndFlush each,
+    |     same Phase 16 exclusion constraints) -> mark import APPROVED -> audit
+    v
+Allocation (status=APPROVED, source_import_id set, inside the target DRAFT version)
+    |
+Phase 18 ScheduleVersionService.publish (separate, explicit, completely unmodified)
+    |   every APPROVED allocation of the version -> PUBLISHED (Allocation.publish(),
+    |   the exact mechanism Phase 18's ADR-091 built and left "currently inert" for)
+    v
+Visible via GET /api/timetable
+```
+
+**No second constraint engine, no second publication algorithm, no second concurrency mechanism** exist anywhere in this package - every one of those three concerns is the same code Phase 9/14/16/18 already built and tested, invoked, not reimplemented.
+
+### A real bug found live: revalidation, not the database, caught a cross-import conflict
+
+Two independently-valid imports (a real, non-hypothetical case: two Lab Assistants preparing separate PDFs that happen to schedule the same lab at the same time) were approved via genuinely parallel HTTP requests. The first committed normally; the second's approval-time revalidation (ADR-102) re-ran the constraint engine against the first's now-persisted row and correctly rejected with `409 TIMETABLE_IMPORT_HAS_ERRORS` *before* attempting any insert - the underlying PostgreSQL exclusion constraint (the same one Phase 16 relies on) remained the unexercised final backstop for this particular race ordering, exactly as designed (defense in depth: two independent layers, either one sufficient).
+
+### Verified end-to-end (Dockerized, 2026-08-25)
+
+Uploaded a PDF row for `BDA` (requires software `CLOUDERA`) targeting a lab without it - validation correctly failed with an explainable `SOFTWARE_MISMATCH` error (reused Phase 9's HC-08, not reimplemented), while mapping itself succeeded (subject/faculty/division/batch all correctly resolved via `SubjectFacultyAssignment`). Confirmed zero allocations existed for the import at this point (`source_import_id` count = 0). Corrected the row's lab to one that provides `CLOUDERA` - revalidated to `VALID` automatically. Approved - exactly one `Allocation` created (`status=APPROVED`, `source_import_id` set, inside the target `DRAFT` version). Confirmed the student timetable still showed nothing from this version (still `DRAFT`). Published that version through the unmodified Phase 18 endpoint - the allocation transitioned to `PUBLISHED` and appeared on the student timetable immediately. Confirmed the mandatory concurrent-approval invariant (two mutually-conflicting, independently-valid imports approved via genuinely parallel requests: one `200`, one clean `409`, exactly one allocation persisted, both imports' history preserved - see above). Confirmed the draft-version guard (upload/approve rejected against `PUBLISHED`/`SUPERSEDED` targets, `409 SCHEDULE_VERSION_NOT_DRAFT`) and the "version published between review and approval" edge case (approval of a still-`VALIDATED` import whose target version was published moments earlier correctly failed safely, creating no allocations). Re-ran the Phase 16 concurrent-booking race, the Phase 17 `psql` immutability proof, and full RBAC (LAB_ASSISTANT 200 / CR 403 / STUDENT 403 / anonymous 401 on every import-management endpoint) - all held. Found and fixed one real bug this way (an `@ExceptionHandler` for `MaxUploadSizeExceededException` collided with `ResponseEntityExceptionHandler`'s own built-in handler for the same type, an application-startup failure only a live boot ever surfaces - see docs/15-DESIGN-DECISIONS.md and docs/14-INTERVIEW-PREPARATION.md "Problem 11").
+
+## 28. Phase 20 — Lab Assistant Frontend (implemented)
+
+Builds the Lab Assistant application against the backend Phases 4-19 already produced - no backend contract changes except one minimal, read-only addition (`GET /api/users?role=`, ADR-113, docs/15-DESIGN-DECISIONS.md).
+
+```text
+Browser
+   |
+React Router (BrowserRouter)
+   |
+ProtectedRoute            - authenticated? no -> /login
+   |
+RequireRouteRole          - LAB_ASSISTANT? no -> / (UX guard only, ADR-109)
+   |
+LabAssistantLayout        - sidebar (grouped nav) + top bar + <Outlet/>
+   |
+Feature page (Dashboard / Labs / Faculty / Subjects / Academic Setup /
+              CR Management / Timetable / Timetable Versions / Imports /
+              Conflicts / Audit Logs / Analytics)
+   |
+TanStack Query            - server-state cache, loading/error, mutation invalidation
+   |
+api/*.ts modules          - one per backend resource area, typed to real DTOs
+   |
+apiClient (Phase 2)       - Authorization header, JSON, 401 handling, multipart upload
+   |
+Spring Boot REST API
+```
+
+**Shared primitives** (`components/`): `DataTable`, `AsyncSection` (loading/error/empty, never a silent `0`), `Pagination`, `ConfirmDialog`, `StatusBadge`, `Card`/`StatCard`, `TermSelect`, `AcademicYearSelector` - small and composable, not one generalized framework (ADR-112).
+
+**The PDF import review workflow** (`ImportReviewPage`) is the most consequential screen: renders per-row raw/normalized/mapped values, structured validation messages in plain language (never a bare `SOFTWARE_MISMATCH` code alone), a correction dialog that submits to the real backend and only updates the row's status from the server's revalidated response (never optimistically), and an approval confirmation dialog that explicitly states allocations are created but the timetable is **not** published - the same trust-boundary distinction Phase 19's backend enforces, now visible in the UI (PART 38/76).
+
+**Conflicts screen** deliberately has no new backend endpoint behind it - it aggregates the real `ERROR`/`WARNING` messages already present on every `NEEDS_REVIEW` import's rows (the same Phase 19 constraint-engine output), rather than inventing a second conflict-detection surface.
+
+**Analytics screen** is an honest, real placeholder ("Analytics will be available after analytics processing is implemented (Phase 23)") - no fabricated metrics, no fake chart, per PART 47/83.
+
+### Verified end-to-end (Dockerized + headless-Chromium, 2026-08-25)
+
+Logged in as the demo Lab Assistant and walked through Dashboard -> Labs -> Lab Detail -> Faculty -> Faculty Availability -> Subjects -> Academic Setup (expandable tree) -> CR Management -> Timetable Versions -> Imports (opened the upload form, confirmed the documented PDF format is shown) -> Audit Logs -> Analytics placeholder, screenshotting each step - **zero browser console errors** across the entire walkthrough, real backend data rendered throughout (e.g. Labs: 15, Faculty: 2, matching the live database). Logged in as the demo CR and navigated directly to `/lab-assistant` - correctly redirected to `/` with no management navigation/content ever rendered (confirmed both by URL and by asserting zero occurrences of Lab-Assistant-only nav text on the resulting page).
+
+## 29. Phase 21 — CR Frontend (implemented)
+
+Builds the CR-facing frontend entirely against unmodified Phases 4/15/18/20 endpoints - no backend changes this phase (ADR-119, docs/15-DESIGN-DECISIONS.md).
+
+```text
+CR login
+   |
+ProtectedRoute (authenticated?) -> RequireRouteRole (role=CR? -> / otherwise)
+   |
+CrLayout (simpler shell than Lab Assistant's - 5 flat nav items, no admin screens)
+   |
+CrAssignmentProvider -- one GET /api/cr-assignments/me for the whole shell (ADR-115)
+   |
+Feature pages: My Class | My Timetable | Available Labs | Schedule Extra Lab | My Extra Labs
+   |
+TanStack Query
+   |
+api/crAssignments.ts (+me) | api/extraLabs.ts (new) | api/scheduleVersions.ts (timetableApi, reused) | api/academic.ts (+getDivision) | api/subjects.ts (reused)
+   |
+Spring Boot API (unchanged)
+```
+
+**CR scope is structural, not just enforced:** the extra-lab search/book request DTOs (`ExtraLabSearchRequest`/`ExtraLabBookingRequest`, Phase 15) carry no `divisionId` field at all - a CR cannot even *attempt* to submit another division's request through this API, let alone through the frontend. The only place a cross-division violation can occur is cancellation (`POST /api/allocations/extra/{id}/cancel` on an allocation belonging to another CR's division), which the backend rejects with `403 FORBIDDEN_DIVISION_ACCESS` - mapped to a clear message, not a raw code.
+
+**Shared search/results components** (`ExtraLabSearchForm`, `ExtraLabResults`, ADR-116) power both Available Labs (search-only) and Schedule Extra Lab (search-then-book) - ranking, scores, and rejection reasons are rendered exactly as the backend's Phase 11/12/13 explainability payload returns them, never recomputed in React.
+
+### A real bug found live: recommendation scores rendered as "0"
+
+Every ranked candidate showed "Recommendation score: 0" in the live UI, even for a genuine ~41% match - `normalizedScore` is a `0.0-1.0` ratio, not `0-100`, and the display code hadn't scaled it. Fixed (`Math.round(score * 100)`); re-verified live - see ADR-118, docs/15-DESIGN-DECISIONS.md.
+
+### Verified end-to-end (Dockerized + headless-Chromium, 2026-08-25)
+
+Logged in as the demo CR: My Class showed the real assigned division (B.Tech, Computer Science, Year 3, Division A, Semester 5 (2026-27)) with no division-choosing control anywhere. My Timetable rendered the current published timetable. Searched Available Labs for BDA against the whole division (correctly explained via the backend's own summary text: "No division-level faculty assignment found..." - BDA is only assigned at batch level in the demo data, proving the explainability path surfaces real backend facts, not just the happy path) and then against batch A1 (3 ranked candidates with real scores/explanations, 12 rejected labs each correctly explaining "does not provide required software: CLOUDERA" - the mandatory BDA/Cloudera scenario, live). Booked a real extra practical through Schedule Extra Lab (confirm dialog -> success screen showing the real faculty name from the booking response) and confirmed it appeared in My Extra Labs. Confirmed a LAB_ASSISTANT session visiting `/cr` directly is redirected to `/` with zero CR navigation ever rendered, and an anonymous visit to `/cr` redirects to `/login` (not `/`, correctly going through `ProtectedRoute` first). **Zero console errors** throughout (after the score-display fix).
+
+**Mandatory concurrent-booking verification** (PART 85): two genuinely parallel `POST /api/allocations/extra` requests for the identical lab/date/time (background `curl`, `wait`-joined) - one `200`, one `409 ALLOCATION_CONFLICT` (with `LAB_CONFLICT`/`FACULTY_CONFLICT`/`BATCH_CONFLICT` violations listed), exactly one blocking allocation in the database. Re-ran the identical race through two genuinely parallel real browser sessions driving the actual UI (two Playwright contexts, both searching, both selecting the same top-ranked candidate, both clicking Confirm within the same event loop tick) - one session's UI showed the success screen, the other showed the exact FCFS conflict message ("This slot is no longer available... search again to see the latest available labs") with a working Search Again action, never a generic error and never a second success. Phase 16's concurrency guarantee is completely unaffected by this phase - no backend code changed.
+
+## 30. Phase 22 — Student Frontend (implemented)
+
+The read-only counterpart to Phase 21's CR frontend, built almost entirely on the same infrastructure and requiring exactly two small, genuine backend additions (ADR-120/121, docs/15-DESIGN-DECISIONS.md).
+
+```text
+Student login
+   |
+ProtectedRoute (authenticated?) -> RequireRouteRole (role=STUDENT? -> / otherwise)
+   |
+StudentLayout (one nav concept: My Timetable - no scheduling/admin screens exist to hide)
+   |
+StudentTimetablePage
+   |  dependent filters: Program -> Stream -> Year -> Division -> Batch (each level resets everything below it)
+   |  + Academic Term (defaults to the ACTIVE term) + Day (client-side, over the fetched page)
+   |  filter state lives in the URL (useSearchParams) - shareable/bookmarkable, no separate state store
+   |
+TanStack Query -> GET /api/timetable (Phase 18, unchanged - always the term's current PUBLISHED version)
+   |
+api/academic.ts (reused, unchanged) | api/scheduleVersions.ts (timetableApi.current, reused; AllocationSummary gains 4 fields)
+   |
+Spring Boot API: TimetableController -> ScheduleVersionService.getPublishedTimetable -> AllocationSpecifications (2 changes)
+```
+
+**No Student-enrollment entity exists** (ADR-122) - unlike the CR flow, a Student has no server-resolvable "own division." The Student picks their own division/batch through the same dependent academic-hierarchy selectors a Lab Assistant already uses, exactly as PART 22 requires this to be handled: documented honestly, not silently invented.
+
+**Two genuine, minimal backend changes, both shared with the CR/Lab-Assistant code that already used the same DTO/specification:**
+1. `AllocationSummaryResponse` gained `subjectName`/`labWing`/`labFloor`/`labRoomNumber` (ADR-120) - the Student UI's mandatory "clear lab location" requirement (PART 12: "C-202, Wing C", not "Lab 5") had no non-N+1 way to be satisfied otherwise, since the fields were already loaded on the server to build the row.
+2. `AllocationSpecifications.batchIdOrDivisionWide` (ADR-121) - a real gap found by re-reading the existing strict `batchId` filter against PART 9's explicit requirement: selecting a batch was silently hiding that batch's division-wide practicals. Fixed only in the student/CR-facing `getPublishedTimetable` path; the Lab Assistant's administrative version-inspector keeps its intentionally strict filter.
+
+**Presentation** (PART 11): day-grouped cards (Monday…Saturday, in that order), each entry showing subject code + full name, faculty, lab code + resolved location string, division/batch, and time - never raw `scheduleVersionId`/`allocationId`/status enum values in the normal view (PART 13).
+
+### Verified end-to-end (Dockerized + headless-Chromium, 2026-08-25)
+
+Booked a real extra practical as the demo CR (BDA, batch A1, lab B-301) so the demo Student account had genuine published data to see - the DevScheduleVersionSeeder deliberately seeds zero allocations (Phase 8 ADR), so this is real data created through the real booking flow, not a database insert. Logged in as `student@example.edu`, selected BTECH -> CS -> Year 3 -> Division A (the exact PART 33 manual-verification path) with no batch selected - saw the division-scoped BDA session with its lab location text ("Wing B", confirmed present). Selected batch A1 - saw all four BDA sessions including the real booking (subject name "Big Data Analytics", faculty "Faculty BDA", lab "B-301 (Wing B, Floor 3, Room 301)"). Applied the Day=Monday filter - all four sessions remained visible (all four bookings happened to land on Mondays) confirming the filter recomputes rather than statically hiding. Logged in as the demo CR and demo Lab Assistant in turn and navigated directly to `/student` - both redirected to `/` with zero Student content ever rendered. **Zero console errors** across the entire run.
+
+### Draft/superseded-hidden guarantee - verified at the integration-test level, not re-proven live
+
+`ScheduleVersionApiIT.publishingASecondVersionSupersedesTheFirstAndStudentSeesOnlyTheCurrentPublishedVersion` and `studentSeesEmptyTimetableWhenTermHasNoPublishedVersionYet` (both pre-existing, Phase 18) already assert this exact guarantee against real V8→PUBLISHED/V9→DRAFT and SUPERSEDED scenarios with real allocation ids, and both still pass unmodified. `/api/timetable` never accepts a caller-supplied status (`AllocationSpecifications.currentlyPublishedForTerm` hard-codes `PUBLISHED`), so nothing about the Phase 22 frontend work could have reintroduced a version-selection leak - re-driving the identical scenario through the browser would exercise the same backend code path these tests already cover, not new risk surface.
+
+## 31. Phase 23 — Analytics (implemented)
+
+Real, persisted-data-only operational analytics for the Lab Assistant, replacing the honest Phase 20 placeholder.
+
+```text
+Lab Assistant Analytics Page (TanStack Query, term-scoped)
+        |
+GET /api/analytics/{summary,lab-utilization,unused-labs,extra-labs,peak-usage,conflicts}
+        |
+AnalyticsController  (@PreAuthorize hasRole('LAB_ASSISTANT'))
+        |
+AnalyticsScopeService  -- resolves {term, [from,to], currentPublishedVersionId} once per request
+        |
+LabUtilizationAnalyticsService | ExtraLabAnalyticsService | PeakUsageAnalyticsService | ConflictAnalyticsService
+        |                                |                          |                         |
+AnalyticsRepository (native @Query + projections)          SchedulingSlotPolicy (Phase 13, reused)
+        |
+PostgreSQL (GROUP BY / SUM / COUNT ... FILTER)
+```
+
+**Operational scope, explicit and reused, never reinvented** (PART 5/6/7): every query is scoped to the term's current `PUBLISHED` `ScheduleVersion` - resolved by `AnalyticsScopeService` via `status = PUBLISHED`, the exact same lookup `TimetableController`/`LabUtilizationService` already rely on, never `MAX(version_number)`. `AllocationStatus.blocksScheduling()` (APPROVED/PUBLISHED) is reused as-is for "active"; `CANCELLED` rows and any other version's rows (`DRAFT`, `SUPERSEDED`) are excluded by construction, not by a per-query ad-hoc filter.
+
+**Utilization formula** (PART 12, mandatory): `bookedMinutes / availableMinutes` per lab, `SUM(booked) / SUM(available)` overall - never a naive average of per-lab percentages (ADR-126, docs/15-DESIGN-DECISIONS.md; a dedicated regression test proves 420/720=58.3%, not the naive (50+100)/2=75%). Available minutes reuse the college's *existing* `SchedulingSlotPolicy` (Phase 13's `app.scheduling.day-start-time`/`day-end-time`/`working-days`) rather than a second, parallel configuration block (ADR-124) - working days in range × daily window, minus merged (never double-subtracted) overlapping `LabUnavailability` time (ADR-125).
+
+**Conflict/success analytics are honestly incomplete, by design, not by oversight** (PART 32-37, ADR-127/128): this system persists no booking-rejection event anywhere - a failed `POST /api/allocations/extra` (409) writes nothing, and search-time candidate rejections are ephemeral, discarded at the end of the same request. `ConflictAnalyticsService` always returns `evidenceAvailable: false` with an explicit explanation; `ExtraLabAnalyticsService` reports `successfulBookings` (real, countable) but never a fabricated success *rate* (no measurable denominator exists).
+
+### Real, live-verified against genuine historical data (2026-08-25)
+
+The Dockerized stack's demo term already carried real multi-version scheduling history from every prior phase's live verification (V1-V5 `SUPERSEDED`, V6 `PUBLISHED`, V7 `DRAFT`) - used directly rather than constructing a synthetic scenario. `SELECT sv.version_number, sv.status, COUNT(a.id) FROM schedule_version sv LEFT JOIN allocation a ... GROUP BY ...` showed 11 total allocations spread across V1/V2/V5/V6 (3+1+0+0+1+6), while `GET /api/analytics/summary` correctly reported `activeAllocations: 6` - proving SUPERSEDED/DRAFT exclusion against real data, not a constructed fixture. Cross-checked lab B-301's booked minutes directly via SQL (`180.0`, 2 allocations) against the API's identical `180`/`2`. Cancelled a real extra-lab booking mid-session and re-queried: `extra-labs` active count dropped 5→4 (cancelled 0→1) and B-301's booked minutes dropped 180→60 in the very next request, live proof cancelled allocations are excluded from active utilization. RBAC verified live: LAB_ASSISTANT 200, CR 403, STUDENT 403, anonymous 401; an invalid date range (`to` before `from`) returned 400 `VALIDATION_ERROR`. Full Analytics page screenshotted via headless Chromium showing real utilization percentages, extra-lab breakdowns, peak usage, unused labs, and the honest conflict-evidence explanation - **zero console errors**.

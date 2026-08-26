@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.when;
 
 import com.college.laballocation.academic.CrAssignmentDtos.CreateCrAssignmentRequest;
+import com.college.laballocation.audit.AuditLogService;
 import com.college.laballocation.common.ApiException;
 import com.college.laballocation.user.AppUser;
 import com.college.laballocation.user.UserRepository;
@@ -31,11 +32,14 @@ class CrAssignmentServiceTest {
     @Mock
     private AcademicTermService academicTermService;
 
+    @Mock
+    private AuditLogService auditLogService;
+
     private CrAssignmentService service;
 
     @BeforeEach
     void setUp() {
-        service = new CrAssignmentService(crAssignmentRepository, userRepository, divisionService, academicTermService);
+        service = new CrAssignmentService(crAssignmentRepository, userRepository, divisionService, academicTermService, auditLogService);
     }
 
     @Test

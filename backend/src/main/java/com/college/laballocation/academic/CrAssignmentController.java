@@ -67,7 +67,7 @@ public class CrAssignmentController {
 
     @DeleteMapping("/{id}")
     @PreAuthorize("hasRole('LAB_ASSISTANT')")
-    public void end(@PathVariable Long id) {
-        crAssignmentService.end(id);
+    public void end(@PathVariable Long id, @AuthenticationPrincipal Long actingUserId) {
+        crAssignmentService.end(id, actingUserId);
     }
 }

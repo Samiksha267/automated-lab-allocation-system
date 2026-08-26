@@ -10,6 +10,7 @@ import com.college.laballocation.subject.SubjectRequirementDtos.SubjectRequireme
 import com.college.laballocation.subject.SubjectRequirementDtos.UpdateEquipmentRequirementQuantityRequest;
 import jakarta.validation.Valid;
 import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
@@ -42,20 +43,23 @@ public class SubjectRequirementController {
 
     @PostMapping("/software-requirements")
     @PreAuthorize("hasRole('LAB_ASSISTANT')")
-    public SoftwareSummary addSoftwareRequirement(@PathVariable Long subjectId, @Valid @RequestBody AddSoftwareRequirementRequest request) {
-        return requirementService.addSoftwareRequirement(subjectId, request);
+    public SoftwareSummary addSoftwareRequirement(
+            @PathVariable Long subjectId, @Valid @RequestBody AddSoftwareRequirementRequest request, @AuthenticationPrincipal Long userId) {
+        return requirementService.addSoftwareRequirement(subjectId, request, userId);
     }
 
     @DeleteMapping("/software-requirements/{softwareId}")
     @PreAuthorize("hasRole('LAB_ASSISTANT')")
-    public void removeSoftwareRequirement(@PathVariable Long subjectId, @PathVariable Long softwareId) {
-        requirementService.removeSoftwareRequirement(subjectId, softwareId);
+    public void removeSoftwareRequirement(
+            @PathVariable Long subjectId, @PathVariable Long softwareId, @AuthenticationPrincipal Long userId) {
+        requirementService.removeSoftwareRequirement(subjectId, softwareId, userId);
     }
 
     @PostMapping("/equipment-requirements")
     @PreAuthorize("hasRole('LAB_ASSISTANT')")
-    public EquipmentSummary addEquipmentRequirement(@PathVariable Long subjectId, @Valid @RequestBody AddEquipmentRequirementRequest request) {
-        return requirementService.addEquipmentRequirement(subjectId, request);
+    public EquipmentSummary addEquipmentRequirement(
+            @PathVariable Long subjectId, @Valid @RequestBody AddEquipmentRequirementRequest request, @AuthenticationPrincipal Long userId) {
+        return requirementService.addEquipmentRequirement(subjectId, request, userId);
     }
 
     @PatchMapping("/equipment-requirements/{equipmentId}")
@@ -63,25 +67,28 @@ public class SubjectRequirementController {
     public EquipmentSummary updateEquipmentRequirementQuantity(
             @PathVariable Long subjectId,
             @PathVariable Long equipmentId,
-            @Valid @RequestBody UpdateEquipmentRequirementQuantityRequest request) {
-        return requirementService.updateEquipmentRequirementQuantity(subjectId, equipmentId, request.requiredQuantity());
+            @Valid @RequestBody UpdateEquipmentRequirementQuantityRequest request,
+            @AuthenticationPrincipal Long userId) {
+        return requirementService.updateEquipmentRequirementQuantity(subjectId, equipmentId, request.requiredQuantity(), userId);
     }
 
     @DeleteMapping("/equipment-requirements/{equipmentId}")
     @PreAuthorize("hasRole('LAB_ASSISTANT')")
-    public void removeEquipmentRequirement(@PathVariable Long subjectId, @PathVariable Long equipmentId) {
-        requirementService.removeEquipmentRequirement(subjectId, equipmentId);
+    public void removeEquipmentRequirement(
+            @PathVariable Long subjectId, @PathVariable Long equipmentId, @AuthenticationPrincipal Long userId) {
+        requirementService.removeEquipmentRequirement(subjectId, equipmentId, userId);
     }
 
     @PutMapping("/lab-type-requirement")
     @PreAuthorize("hasRole('LAB_ASSISTANT')")
-    public LabTypeSummary setLabTypeRequirement(@PathVariable Long subjectId, @RequestBody SetLabTypeRequirementRequest request) {
-        return requirementService.setLabTypeRequirement(subjectId, request);
+    public LabTypeSummary setLabTypeRequirement(
+            @PathVariable Long subjectId, @RequestBody SetLabTypeRequirementRequest request, @AuthenticationPrincipal Long userId) {
+        return requirementService.setLabTypeRequirement(subjectId, request, userId);
     }
 
     @DeleteMapping("/lab-type-requirement")
     @PreAuthorize("hasRole('LAB_ASSISTANT')")
-    public void clearLabTypeRequirement(@PathVariable Long subjectId) {
-        requirementService.clearLabTypeRequirement(subjectId);
+    public void clearLabTypeRequirement(@PathVariable Long subjectId, @AuthenticationPrincipal Long userId) {
+        requirementService.clearLabTypeRequirement(subjectId, userId);
     }
 }

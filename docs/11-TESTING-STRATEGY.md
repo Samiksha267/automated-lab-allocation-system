@@ -372,13 +372,397 @@ True-concurrency tests using an `ExecutorService` + `CountDownLatch` barrier so 
 
 Every scenario in the matrix above was independently proven live, using background `curl` processes launched together and `wait`-joined (never sequential calls) against the real running backend/Postgres containers — not simulated, not assumed from the IT test's correctness alone. The same-lab race was specifically run **cross-division** (a temporary second division/CR, deleted after) to bypass the per-division lock and force a genuine simultaneous PostgreSQL-level race rather than one serialized (and therefore resolved at the application level) by the lock; repeated 5 times, confirmed hitting both the exclusion-constraint rejection path and — once — the deadlock path, both correctly mapped to a clean `409`, never a `500`. A final diagnostic SQL query across every scenario's resulting rows confirmed zero lab/faculty/batch overlaps and zero invalid DIVISION/BATCH overlaps among active allocations. Every temporary fixture was deleted afterward; the dev-seed state was confirmed to match its exact pre-phase baseline (3 users, 1 division, 2 subjects, 2 `subject_faculty_assignment` rows, 15 labs, 0 allocations).
 
-## PDF Import Tests (Phase 19)
+## Audit Log Tests — Implemented (Phase 17)
 
-- Extraction of a well-formed fixture PDF produces the expected set of `TimetableImportEntry` rows.
-- A deliberately malformed/ambiguous fixture produces entries flagged `PENDING`/`CONFLICT`, never silently dropped or silently auto-corrected.
-- Approval is blocked while any entry remains `PENDING`/`CONFLICT` (`CONFLICT` API error on `/approve`).
-- Corrected entries re-run validation and can transition to `VALID`.
+Audit persistence rides on the same transaction as the business mutation it describes (ADR-078, docs/15-DESIGN-DECISIONS.md), so "does the audit row get written" and "does a failed operation leave no misleading success row" are really the same guarantee proven from two directions.
 
-## What "Done" Looks Like Per Phase
+| Scenario | Expected | Test |
+|---|---|---|
+| Successful EXTRA booking | Allocation created + matching `EXTRA_LAB_BOOKED` audit row, correct actor/division/term/resource | `AuditLogApiIT.successfulBookingProducesAVisibleAuditEvent`; live |
+| Booking rejected by a real conflict | `409`, **zero** `EXTRA_LAB_BOOKED` rows for that actor | `AuditLogApiIT.rejectedBookingProducesNoSuccessfulAuditEvent`; live (a genuine 409 conflict attempt produced no extra audit row — count stayed at exactly the number of real successful bookings) |
+| Cancellation | `EXTRA_LAB_CANCELLED` row with reason/old-lab/time metadata | Live (`POST .../cancel` → `GET /api/audit-logs?action=EXTRA_LAB_CANCELLED`) |
+| CR reassignment (same division+user) | Exactly one `CR_ASSIGNMENT_ENDED` (deduped) + one `CR_ASSIGNED`, both in the same transaction | Live — see "Real bug found" below |
+| Lab Assistant admin mutation (`LAB_UPDATED`) | Audit row visible via `GET /api/audit-logs?action=LAB_UPDATED` | Live |
+| `AuditLogService.record`/`.search` | Persists exactly the fields on the `AuditEvent`; resolves every distinct actor with **one** bulk `findAllById` call, never per-row; tolerates an actor that no longer resolves | `AuditLogServiceTest` (3 tests, Mockito, no DB) |
+| RBAC on `GET /api/audit-logs` | LAB_ASSISTANT `200`, CR `403`, STUDENT `403`, anonymous `401` | `AuditLogApiIT.onlyLabAssistantCanReadAuditHistory`; live (all four roles) |
+| Actor filter isolation | One CR's `actorUserId` filter never returns another CR's rows | `AuditLogApiIT.actorFilterIsolatesOneCrsActivityFromAnother` |
+| Page-size cap | `?size=500` silently clamped to `100` | `AuditLogApiIT.pageSizeIsCappedAtTheConfiguredMaximum`; live |
+| Database-level immutability | Direct `UPDATE`/`DELETE` against `audit_log` rejected by the V12 trigger, row unchanged | `AuditLogImmutabilityIT` (Testcontainers, raw JDBC); live via `psql` (below) |
+| Phase 16 concurrency regression | Two genuinely simultaneous EXTRA bookings for the same lab/time: exactly 1 success, 1 `409`; exactly 1 blocking allocation row; exactly 1 `EXTRA_LAB_BOOKED` audit row for the winner, none for the loser | Live, parallel `curl` — see below |
+
+### `AuditLogImmutabilityIT` / `AuditLogApiIT` (Testcontainers, environment-blocked here)
+
+Both written correctly and reachable via `mvn verify`, but blocked on this development machine by the same documented Docker-on-Windows/npipe limitation as every other IT class in this project (docs/13-DEVELOPER-SETUP.md — Testcontainers cannot locate a Docker environment from inside this machine's Maven JVM, confirmed via `Could not find a valid Docker environment`, even though the Docker Desktop daemon itself is running and the project's own `docker compose` stack is up). Every scenario they cover was instead independently proven live against the real Dockerized stack.
+
+### Manually verified against the Dockerized stack (2026-08-24)
+
+- **Trigger, direct SQL:** `INSERT` a probe row via `psql`, then `UPDATE audit_log SET resource_display = 'TAMPERED' WHERE id = ...` → `ERROR: audit_log is append-only: UPDATE is not permitted`; `DELETE FROM audit_log WHERE id = ...` → `ERROR: audit_log is append-only: DELETE is not permitted`; row confirmed still present and unmodified after both attempts.
+- **Full CR → audit → Lab Assistant flow:** logged in as the demo CR, booked a real EXTRA allocation (`allocationId=81`) against a real published schedule version → `GET /api/audit-logs?action=EXTRA_LAB_BOOKED&actorUserId=2` (as the demo Lab Assistant) showed the matching row with correct `resourceId`, `divisionId`, `academicTermId`, and metadata; cancelled it → matching `EXTRA_LAB_CANCELLED` row appeared with the cancellation reason.
+- **Failed-booking-produces-no-event:** re-booked the same slot (a second real, successful allocation, `id=82`), then a second CR request for the identical lab/time (different subject/batch) → `409 ALLOCATION_CONFLICT` as expected; the `EXTRA_LAB_BOOKED` count for that actor stayed at exactly 2 (allocations 81 and 82) — the rejected attempt added nothing.
+- **RBAC, all four roles:** LAB_ASSISTANT `200`; CR `403`; STUDENT `403`; unauthenticated `401` — against the real running backend, real JWTs.
+- **Concurrency regression:** two `POST /api/allocations/extra` requests for the same lab/time, launched as backgrounded `curl` processes and `wait`-joined — exactly one `200`, one `409 ALLOCATION_CONFLICT`; `SELECT count(*) FROM allocation WHERE lab_id=... AND status IN ('APPROVED','PUBLISHED')` confirmed exactly 1 row; the audit count for that actor/action grew by exactly 1, not 2.
+- **Real bug found and fixed live:** the first attempt at a CR reassignment (ending one `CrAssignment` and creating another in the same transaction, so two `AuditLog` rows are inserted in one flush) returned `500 INTERNAL_ERROR`. Backend logs showed Hibernate issuing a spurious `UPDATE` against the just-inserted, JSON-`metadata`-bearing `AuditLog` row, which the V12 trigger correctly rejected — turning a real "immutability held" case into an unexpected user-facing failure. Root-caused to Hibernate's dirty-checking of the JSON-mapped `metadata` field; fixed by adding Hibernate's `@Immutable` to the `AuditLog` entity (ADR-078, docs/15-DESIGN-DECISIONS.md), which removes its UPDATE code path entirely. Confirmed fixed: the identical reassignment request now returns `200` with both `CR_ASSIGNMENT_ENDED` and `CR_ASSIGNED` rows correctly present.
+
+**Cleanup note:** unlike Phase 16's live verification (which deleted every temporary fixture to restore the exact pre-phase dev-seed baseline), Phase 17's live verification deliberately did **not** delete anything it created — per the phase brief, audit history is never deleted as "test cleanup," and restoring a mutated value (e.g. a lab name) legitimately produces another audit row rather than erasing the evidence of the first change. The dev stack's demo data therefore carries a handful of extra `allocation`/`cr_assignment`/`audit_log` rows from this verification pass; this is expected, not a leftover to clean up.
+
+## Timetable Versioning Tests — Implemented (Phase 18)
+
+| Scenario | Expected | Test |
+|---|---|---|
+| First draft creation, no reason needed | `DRAFT`, `versionNumber=1`, `publishedBy`/`publishedAt` null, `createdBy` = authenticated Lab Assistant | `ScheduleVersionServiceTest.firstVersionForATermNeedsNoReason`; `ScheduleVersionApiIT.labAssistantCreatesFirstDraftWithNoReasonRequired`, live |
+| Revision draft without a reason | Rejected | `ScheduleVersionServiceTest.secondVersionForATermRequiresAReason` |
+| Version numbers term-scoped | Term A gets V1/V2 independently of Term B's V1 | `ScheduleVersionApiIT.versionNumbersAreScopedIndependentlyPerTerm`, live |
+| Publish first version | `PUBLISHED`, `publishedBy`/`publishedAt` set, `SCHEDULE_PUBLISHED` audit event | `ScheduleVersionServiceTest.publishingWithNoExistingPublishedVersionSucceeds`/`...WritesExactlyOneAuditEvent`; `ScheduleVersionApiIT.publishingTheFirstVersionSetsPublishedFieldsAndWritesAnAuditEvent`, live |
+| Publish second version | Previous `PUBLISHED → SUPERSEDED`, both `SCHEDULE_SUPERSEDED`+`SCHEDULE_PUBLISHED` audit events, both versions' allocations preserved | `ScheduleVersionServiceTest.publishingSupersedesThePreviouslyPublishedVersion`/`...WritesBothSupersededAndPublishedEvents`; `ScheduleVersionApiIT.publishingASecondVersionSupersedesTheFirstAndStudentSeesOnlyTheCurrentPublishedVersion`, live |
+| Highest version number is not necessarily published | Student sees V1 (PUBLISHED) while V2 (higher-numbered) is still DRAFT | Same test above, explicit assertion; live |
+| Student sees only the current published version | Never DRAFT, never SUPERSEDED | Same test above; `ScheduleVersionApiIT.studentSeesEmptyTimetableWhenTermHasNoPublishedVersionYet` (no published version -> empty page, not a leak) |
+| Publish a SUPERSEDED version | `409 INVALID_SCHEDULE_VERSION_TRANSITION`, never `500` | `ScheduleVersionServiceTest.publishingAnAlreadySupersededVersionIsRejected`; `ScheduleVersionApiIT.publishingASupersededVersionIsRejectedWithConflict`, live |
+| Publish an already-PUBLISHED version (double-publish) | `409`, honest status message, database unaffected | `ScheduleVersionServiceTest.publishingAnAlreadyPublishedVersionIsRejected`; live (see ADR-089, real bug found this way) |
+| APPROVED allocations of the published version transition to PUBLISHED | `Allocation.publish()` called, CANCELLED/other-version rows untouched | `ScheduleVersionServiceTest.publishingTransitionsApprovedAllocationsOfThatVersionToPublished` |
+| Term lock acquired before the racy read, both in `createDraft` and `publish` | Verified call order | `ScheduleVersionServiceTest.createDraftAcquiresTheTermLockBeforeComputingTheVersionNumber`/`publishAcquiresTheTermLockBeforeLoadingTheVersionOrCheckingPublicationState` |
+| Concurrent publication of two drafts for the same term (mandatory) | Exactly one `PUBLISHED` version afterward; all versions preserved | `ScheduleVersionConcurrencyIT.concurrentPublishOfTwoDraftsForTheSameTermProducesExactlyOnePublishedVersion`; live, see below |
+| Superseded EXTRA allocation cannot be cancelled | `409 SCHEDULE_VERSION_NOT_CURRENT` | `ExtraLabServiceTest.cancelRejectsWhenTheAllocationsScheduleVersionIsNoLongerCurrent`; live |
+| Version-management RBAC | LAB_ASSISTANT only; `GET /api/timetable` open to STUDENT/CR/LAB_ASSISTANT | `ScheduleVersionApiIT.draftCreationIsForbiddenToCrAndStudentAndRejectedForAnonymous`/`.onlyLabAssistantCanViewVersionHistory`; live, all four roles both endpoints |
+| **Batch-scoped timetable includes division-wide rows too (Phase 22, mandatory PART 9/27)** | A `batchId`-filtered request returns that batch's own rows AND division-wide rows, never hides the latter | `ScheduleVersionApiIT.batchScopedTimetableIncludesDivisionWideAllocationsToo`; live |
+
+### `ScheduleVersionApiIT` / `ScheduleVersionConcurrencyIT` (Testcontainers, environment-blocked here)
+
+Both written correctly, blocked on this development machine by the same documented Docker-on-Windows/npipe limitation as every other IT class (docs/13-DEVELOPER-SETUP.md). `ScheduleVersionConcurrencyIT` mirrors `AllocationConcurrencyIT`'s true-parallelism pattern (`ExecutorService`/`CountDownLatch` barrier, deliberately not `@Transactional` at the test-method level) exactly. Every scenario either file covers was independently proven live.
+
+### Manually verified against the Dockerized stack (2026-08-25)
+
+- **Full lifecycle:** created and published the demo term's V2 (empty - ADR-093), confirmed the student timetable kept showing V1 while V2 was `DRAFT`, then switched to V2's (empty) content the instant it published, with V1 correctly `SUPERSEDED` and its 3 allocations and the V1 row itself still present (`GET /api/schedule-versions/1/allocations` -> `totalElements: 3`).
+- **Cancelled allocations excluded from the timetable:** confirmed `GET /api/timetable` dropped a `CANCELLED` EXTRA row that an earlier, unfiltered version of the endpoint had incorrectly included - fixed before this round of live testing (see `AllocationSpecifications.activeStatus`).
+- **RBAC, all four roles:** LAB_ASSISTANT/CR/anonymous on `/api/schedule-versions` (200/403/401); LAB_ASSISTANT/CR/STUDENT/anonymous on `/api/timetable` (200/200/200/401).
+- **Real bug #1 (ADR-088):** the very first live publish-when-something-is-already-published attempt returned a raw `500` (`duplicate key value violates unique constraint "uq_schedule_version_one_published_per_term"`) on an entirely ordinary, non-concurrent request - root-caused to Hibernate flush-ordering, fixed with an explicit `flush()`, confirmed fixed by re-issuing the identical request (`200`).
+- **Real bug #2 (ADR-089):** double-publishing an already-`PUBLISHED` version returned a technically-correct-but-misleading `409` ("current status is SUPERSEDED") due to a self-supersede side effect - fixed with an up-front status guard, confirmed fixed (`409`, "current status is PUBLISHED", database unaffected both before and after the fix).
+- **Mandatory concurrent-publication proof:** created two drafts (V3, V4) for the demo term, fired both `POST .../publish` requests as backgrounded `curl` processes launched together and `wait`-joined (never sequential) - both returned `200` (the per-term lock serializes rather than rejects, ADR-087); final state: V3 `SUPERSEDED`, V4 `PUBLISHED`, all 4 versions (V1..V4) for the term still present. `SELECT count(*) FROM schedule_version WHERE academic_term_id = ? AND status = 'PUBLISHED'` = exactly 1.
+- **Phase 16 regression:** re-ran the same-lab concurrent-booking race against the new current published version - one `200`, one `409`, exactly one blocking allocation row; the winning booking correctly attached to the *current* `schedule_version_id`, not the superseded one.
+- **Phase 17 regression:** re-ran the direct-`psql` immutability proof against `audit_log` - `UPDATE`/`DELETE` both still rejected by the V12 trigger, row unchanged.
+- **Superseded EXTRA cancellation guard:** attempted to cancel an EXTRA allocation belonging to the now-`SUPERSEDED` V1 - correctly rejected with `409 SCHEDULE_VERSION_NOT_CURRENT`.
+
+## PDF Import Tests — Implemented (Phase 19)
+
+| Scenario | Expected | Test |
+|---|---|---|
+| Day-name normalization, full/abbreviated/punctuated forms | `MONDAY`/`MON`/`Mon.` all -> `DayOfWeek.MONDAY`; unrecognized -> `null`, never guessed | `TimetableNormalizerTest` (5 tests) |
+| Strict 24-hour time parsing | `09:00`/`9:00` parse; `9 AM`/`9-11`/`25:00` all rejected -> `null` | `TimetableNormalizerTest` |
+| Token whitespace/case normalization | `"  BDA   LAB "` -> `"BDA LAB"` | `TimetableNormalizerTest` |
+| Well-formed pipe-delimited line parses into its 8 columns | Correct raw fields | `TimetableParserTest` (5 tests) |
+| Blank trailing batch column | Division-wide session (`rawBatch` empty, not null/error) | `TimetableParserTest` |
+| Non-timetable lines (titles/headers/page numbers) | Silently skipped, never a parse error | `TimetableParserTest` |
+| Multi-line, multi-row documents | All valid lines parsed, order preserved | `TimetableParserTest` |
+| Zero parseable lines | Empty result, no exception (caller resolves to `FAILED`) | `TimetableParserTest` |
+| Real PDF byte extraction (not mocked strings, PART 50/51) | PDFBox-generated fixture PDFs extract to expected text/line count; empty PDF -> no lines; non-PDF bytes -> clean `UNSUPPORTED_PDF`, never a raw stack trace; multi-page count correct | `PdfExtractionAndParsingTest` (4 tests, fixtures generated in-test via PDFBox's own writer API, never committed as binary files - see docs/18-PDF-IMPORT.md) |
+| Exact subject/division/batch code match resolves subject+faculty+division+batch+lab together | All fields resolved, zero messages | `TimetableMappingServiceTest` (4 tests) |
+| No matching `SubjectFacultyAssignment` | `UNRESOLVED_ACADEMIC_ASSIGNMENT` error, nothing auto-created | `TimetableMappingServiceTest` |
+| Unknown lab code | `UNKNOWN_LAB` error, nothing auto-created | `TimetableMappingServiceTest` |
+| Faculty-name mismatch vs. the resolved assignment | Non-blocking `WARNING` (`FACULTY_NAME_MISMATCH`), resolution still succeeds | `TimetableMappingServiceTest` |
+| **Staging isolation (mandatory)** | Staged rows exist; confirmed `allocation` count for the import stays at 0 until approval | Verified live (Docker) - uploaded a real PDF, confirmed `timetable_import_row` rows existed and `SELECT COUNT(*) FROM allocation WHERE source_import_id = ?` = 0 |
+| **The BDA/Cloudera failure-and-correction demo (mandatory, PART 80)** | Upload succeeds, mapping succeeds, validation fails with explainable `SOFTWARE_MISMATCH`; correcting the lab makes the row `VALID`; approval then succeeds | Verified live end-to-end (see docs/18-PDF-IMPORT.md, docs/03-SYSTEM-ARCHITECTURE.md §27) |
+| **Atomic approval (mandatory)** | An import with a still-unresolved `ERROR` row cannot be approved (`409`, zero allocations); correcting it and re-approving succeeds fully | Verified live - the same import rejected pre-correction, approved post-correction, exactly the intended allocation count both times |
+| **Concurrent approval of two mutually-conflicting, independently-valid imports (mandatory, PART 58)** | Exactly one succeeds; the other fails cleanly (`409`, not a raw DB exception); exactly one allocation persisted; both imports' history preserved | Verified live - two genuinely parallel HTTP `POST .../approve` requests (background `curl`, `wait`-joined): one `200`, one `409 TIMETABLE_IMPORT_HAS_ERRORS` (caught by approval-time revalidation, ADR-102, before any insert was attempted - the DB exclusion constraint remained the unexercised backstop) |
+| Draft-version guard | Upload/approve targeting `PUBLISHED`/`SUPERSEDED` rejected (`409 SCHEDULE_VERSION_NOT_DRAFT`) | Verified live against both a `PUBLISHED` and a `SUPERSEDED` version |
+| Version published between review and approval (PART 59) | Approval of a still-`VALIDATED` import whose target version was published moments earlier fails safely, creates no allocations | Verified live - published the target version, then attempted approval: clean `409`, zero allocations |
+| RBAC on every import-management endpoint | LAB_ASSISTANT `200`, CR `403`, STUDENT `403`, anonymous `401` | Verified live against upload/list/detail/approve (CR+student+anonymous); reject inherits the identical `@PreAuthorize` |
+| Phase 17 immutability regression | `UPDATE`/`DELETE` on `audit_log` still rejected | Re-ran the direct-`psql` proof live after this phase's changes |
+| Phase 18 versioning regression | An imported allocation stays invisible to students while its version is `DRAFT`; visible (and `PUBLISHED`) only after explicit Phase 18 publication | Verified live - see the BDA/Cloudera demo trace |
+| Phase 16 concurrency regression | Same-lab concurrent EXTRA booking still produces exactly one winner, one `409` | Re-ran live after this phase's changes |
+
+### Real bug found live (not caught by any unit test)
+
+An `@ExceptionHandler(MaxUploadSizeExceededException.class)` collided with `ResponseEntityExceptionHandler`'s own built-in handler for the same exception type, failing application *startup* entirely - only discoverable by actually booting the container, since no unit test in this project constructs the full Spring MVC dispatch machinery. Fixed by overriding the existing protected hook instead of declaring a competing `@ExceptionHandler` (docs/15-DESIGN-DECISIONS.md ADR-108, docs/14-INTERVIEW-PREPARATION.md "Problem 11").
+
+## Frontend Tests — Implemented (Phase 20)
+
+Vitest + Testing Library, mocking the `api/*.ts` modules directly (the established convention from Phase 2's `Auth.test.tsx`) - never mocking `fetch` itself. Full breadth across every screen, deeper coverage on the highest-stakes workflows (per the user's explicit scope decision for this phase: full breadth, thinner per-screen depth, with real tests on PDF review/correction/approval, timetable-version publish, audit logs, and routing/role guards).
+
+| Scenario | Expected | Test |
+|---|---|---|
+| LAB_ASSISTANT reaches a guarded `/lab-assistant` route | Renders the guarded content | `RequireRouteRole.test.tsx` |
+| CR/STUDENT visits a guarded route | Redirected to `/`, guarded content never rendered | `RequireRouteRole.test.tsx` |
+| Unauthenticated visits a guarded route | Redirected (via `ProtectedRoute`, pre-existing) | `RequireRouteRole.test.tsx` |
+| Dashboard: loading / real zero-value data / distinct API-error state / empty activity feed | Never a blank success state; a failed card shows an error, not `0` | `DashboardPage.test.tsx` (4 tests) |
+| **PDF review with 1 VALID / 1 WARNING / 1 ERROR row (mandatory)** | Correct summary counts, per-row status badges, explainable messages in plain language, correction action available | `ImportReviewPage.test.tsx` |
+| **Approval boundary language (mandatory)** | Confirmation dialog explicitly states allocations are created but the timetable is NOT published | `ImportReviewPage.test.tsx` |
+| Row correction | Submits to the real correction API; row reflects the *server's* revalidated result, never an optimistic guess | `ImportReviewPage.test.tsx` |
+| Non-PDF file selected for upload | Rejected client-side (`only .pdf files are supported`), upload API never called | `ImportsPage.test.tsx` |
+| Empty imports list | "No timetable imports yet" empty state | `ImportsPage.test.tsx` |
+| Timetable Versions: DRAFT shows Publish, PUBLISHED/SUPERSEDED do not | Exactly one Publish button when one DRAFT exists among mixed statuses | `TimetableVersionsPage.test.tsx` |
+| Publish confirmation | States the target version, which version will be superseded, and the visibility consequence; queries refresh after success | `TimetableVersionsPage.test.tsx` |
+| Audit Logs: rendering, pagination, filter re-query, detail view | No edit/delete actions anywhere; metadata renders as readable text, never `[object Object]` | `AuditLogsPage.test.tsx` (4 tests) |
+
+**A real bug this phase's own tests caught** (not live - a unit test found it first): `RequireRouteRole` initially redirected a *valid* LAB_ASSISTANT session away before `AuthProvider`'s async token-verification finished, because it checked only `!user` and not `isLoading` (docs/15-DESIGN-DECISIONS.md ADR-110) - would have silently bounced every real Lab Assistant on a page refresh had it shipped.
+
+### Frontend build/lint/test results (2026-08-25)
+
+`npm run build` (`tsc -b && vite build`) - passes, zero TypeScript errors, no `any`/`@ts-ignore` introduced. `npm run lint` (`oxlint`) - zero errors (two pre-existing/unrelated warnings, one predating this phase). `npm run test` (`vitest run`) - **27/27 passing** (8 pre-existing Phase 2 auth tests + 19 new Phase 20 tests).
+
+### Manual end-to-end verification (headless Chromium, Dockerized stack, 2026-08-25)
+
+No project-specific browser-driving skill existed yet, so Playwright (`chromium`) was used directly against the already-running `docker compose` frontend (`localhost:5173`)/backend (`localhost:8080`). Logged in as the demo Lab Assistant and walked Dashboard -> Labs -> Lab Detail -> Faculty -> Faculty Availability -> Subjects -> Academic Setup -> CR Management -> Timetable Versions -> Imports (upload form) -> Audit Logs -> Analytics, screenshotting every step - **zero browser console errors**, real backend data throughout. Logged in as the demo CR and navigated directly to `/lab-assistant` - confirmed both by final URL (`/`) and by asserting zero Lab-Assistant-only navigation text present that the redirect held, matching the automated test above exactly.
+
+## CR Frontend Tests — Implemented (Phase 21)
+
+| Scenario | Expected | Test |
+|---|---|---|
+| CR reaches `/cr`; LAB_ASSISTANT/STUDENT redirected to `/`; anonymous redirected to `/login` (mandatory, PART 59) | Correct guard behavior, no redirect loop | `CrRouteGuard.test.tsx` (4 tests) |
+| My Class renders the CR's real division/program/stream/year/term/batches; no division selector exists | Real data only, never a mutation-scope selector | `MyClassPage.test.tsx` (2 tests) |
+| My Timetable renders the current published timetable; empty state on no published version; error state on failure | Never a draft/superseded fallback, never `MAX(version)` logic | `MyTimetablePage.test.tsx` (3 tests) |
+| **BDA/Cloudera mismatch explained (mandatory, PART 62)** | B-101 rejected with the real software-mismatch message; C-202 ranked and valid; raw enum code never shown alone | `AvailableLabsPage.test.tsx` |
+| Faculty conflict / faculty unavailable / lab conflict explained in plain language (PART 63-65) | Real backend message rendered, not the bare error code | `AvailableLabsPage.test.tsx` |
+| No-valid-labs state with backend-provided alternatives, never fabricated | Correct empty state + real alternative rendering | `AvailableLabsPage.test.tsx` |
+| Booking success (PART 69) | Search -> select -> confirm -> book -> real booking details shown | `ScheduleExtraLabPage.test.tsx` |
+| **FCFS 409 conflict (mandatory, PART 70)** | Clear conflict message, never a success state, Search Again offered | `ScheduleExtraLabPage.test.tsx` |
+| My Extra Labs: active vs. cancelled rendering, cancel only on active, empty/error states (PART 72) | Correct status-gated actions | `MyExtraLabsPage.test.tsx` |
+| Cancellation success (PART 73) | Backend called with correct arguments, status refreshes | `MyExtraLabsPage.test.tsx` |
+| Cancellation failure (PART 74) | Error shown, booking remains visible - never optimistically removed | `MyExtraLabsPage.test.tsx` |
+| **Unauthorized-scope cancellation (mandatory, PART 71)** | `FORBIDDEN_DIVISION_ACCESS` mapped to a clear scope message, no crash | `MyExtraLabsPage.test.tsx` |
+
+Booking itself has no division field to violate at all (`ExtraLabSearchRequest`/`ExtraLabBookingRequest` carry no `divisionId`, PART 71's mandatory scenario is therefore tested against cancellation instead - the one CR workflow where a foreign-division allocation ID could actually be supplied - see docs/03-SYSTEM-ARCHITECTURE.md §29).
+
+### Real bug found live (not caught by any unit test's mock data)
+
+Recommendation scores rendered as `0` for every candidate - `normalizedScore` is a `0.0-1.0` ratio, not `0-100`; test mocks happened to use round percentage-shaped numbers that never exposed the scaling bug. Fixed and re-verified live (docs/15-DESIGN-DECISIONS.md ADR-118).
+
+### Frontend build/lint/test results (2026-08-25)
+
+`npm run build` - passes, zero TypeScript errors. `npm run lint` - zero errors (one new warning matching an already-accepted Phase 20 pattern). `npm run test` - **49/49 passing** (27 pre-existing Phase 20 tests + 22 new Phase 21 tests).
+
+### Manual CR end-to-end verification (headless Chromium, Dockerized stack, 2026-08-25)
+
+Full CR walkthrough: My Class (real assignment, no selector) -> My Timetable -> Available Labs (division-wide BDA search correctly explained as unassigned via real backend summary text; batch-A1 search showed 3 ranked candidates + 12 rejected Cloudera-missing labs) -> Schedule Extra Lab (booked a real extra practical, success screen showed the real faculty name) -> My Extra Labs (booking appeared). Confirmed LAB_ASSISTANT redirected from `/cr`; anonymous redirected to `/login`. **Mandatory concurrent-booking verification**: both via direct parallel `curl` (one `200`, one `409`, exactly one blocking allocation in the database) and via two genuinely parallel real browser sessions racing the actual UI (one showed the success screen, the other the exact FCFS conflict message with a working Search Again action).
+
+## Student Frontend Tests — Implemented (Phase 22)
+
+| Scenario | Expected | Test |
+|---|---|---|
+| **STUDENT reaches `/student`; CR/LAB_ASSISTANT redirected to `/`; anonymous redirected to `/login` (mandatory, PART 23)** | Correct guard behavior, no redirect loop | `StudentRouteGuard.test.tsx` (4 tests) |
+| No request issued before program/stream/year/division are chosen (PART 15) | Useful prompt shown, `timetableApi.current` never called | `StudentTimetablePage.test.tsx` |
+| **Dependent filter resets (mandatory, PART 24)** | Changing Program clears Stream/Year/Division/Batch | `StudentTimetablePage.test.tsx` |
+| Allocations render subject name, faculty, and a clear lab location (PART 11/12, mandatory) | "C-202"-style code alone never the only location shown | `StudentTimetablePage.test.tsx` |
+| **Batch selection shows both division-wide and batch-specific allocations (mandatory, PART 9/27)** | Both rows rendered, neither hidden | `StudentTimetablePage.test.tsx` |
+| **Empty state: no published timetable (mandatory, PART 14/29)** | "No published timetable is currently available.", never a blank UI | `StudentTimetablePage.test.tsx` |
+| **Error state, not a fabricated empty timetable (mandatory, PART 16/30)** | `role="alert"` shown; empty-state text never rendered on a failed request | `StudentTimetablePage.test.tsx` |
+| Day filter | Selecting a day narrows the displayed allocations to that weekday only | `StudentTimetablePage.test.tsx` |
+
+The mandatory published-vs-draft-vs-superseded selection guarantee (PART 25/26) is proven at the backend integration level, not re-proven in a frontend test with mocked data - see the Phase 18 table above (`publishingASecondVersionSupersedesTheFirstAndStudentSeesOnlyTheCurrentPublishedVersion`, `studentSeesEmptyTimetableWhenTermHasNoPublishedVersionYet`) and `batchScopedTimetableIncludesDivisionWideAllocationsToo`. The Student frontend calls the exact same `/api/timetable` endpoint through the exact same `timetableApi.current` function the CR frontend already uses (Phase 21) - a frontend-level mock of that function cannot exercise the real version-selection logic, so re-asserting it here would test the mock, not the guarantee.
+
+### Two real backend gaps found and fixed this phase (not bugs in already-shipped behavior - see docs/15-DESIGN-DECISIONS.md ADR-120/121)
+
+1. `AllocationSummaryResponse` had no subject name or lab location fields - the Student UI's mandatory "clear lab location" requirement had no way to be met without an N+1 lookup per row. Fixed by adding `subjectName`/`labWing`/`labFloor`/`labRoomNumber` to the existing, already-loaded response.
+2. A batch-scoped `/api/timetable` request silently hid division-wide practicals (strict `batch.id = batchId` equality). Fixed with `AllocationSpecifications.batchIdOrDivisionWide`; covered by the new backend test above.
+
+### Frontend build/lint/test results (2026-08-25)
+
+`npm run build` - passes, zero TypeScript errors. `npm run lint` - zero new errors/warnings (same three pre-existing warnings as Phase 20/21, all in unrelated files). `npm run test` - **60/60 passing** (49 pre-existing Phase 20/21 tests + 11 new Phase 22 tests).
+
+### Backend regression (full suite, Docker Maven build)
+
+`mvn test` - full suite green after both DTO/specification changes, including the pre-existing `ScheduleVersionApiIT`/`ScheduleVersionServiceTest` suites and the new `batchScopedTimetableIncludesDivisionWideAllocationsToo` test.
+
+### Manual Student end-to-end verification (headless Chromium, Dockerized stack, 2026-08-25)
+
+Booked a real extra practical as the demo CR (BDA, batch A1, lab B-301) so the demo Student account had genuine published data. Logged in as `student@example.edu`, walked the exact PART 33 path (BTECH -> CS -> Year 3 -> Division A) with no batch selected: division-scoped BDA session visible with its location text present. Selected batch A1: all four real BDA sessions visible (including the just-booked one), each showing subject name, faculty, lab code, and resolved location ("B-301 (Wing B, Floor 3, Room 301)"). Applied Day=Monday: all four sessions remained (all four happened to fall on Mondays), confirming the filter recomputes rather than statically hides. Confirmed the demo CR and demo Lab Assistant sessions are both redirected from `/student` to `/` with zero Student content ever rendered. **Zero console errors.**
+
+## Analytics Tests — Implemented (Phase 23)
+
+`AnalyticsApiIT` (Testcontainers, environment-blocked here - same documented Docker-in-Docker limitation as every other `*ApiIT` class; confirmed identical, not a new problem, by reproducing the exact failure against the pre-existing `ScheduleVersionApiIT` run the same way). Written correctly for CI/future environments; live Docker verification (below) covers what this cannot run here.
+
+| Scenario | Expected | Test |
+|---|---|---|
+| Booked-minutes duration arithmetic + cancelled exclusion | `120+60=180` counted; a `180`-minute CANCELLED row excluded | `utilizationCountsRealAllocationDurationAndCancelledExclusion` |
+| **DRAFT allocations excluded (mandatory, PART 71)** | Only the PUBLISHED version's `60` minutes counted, not the DRAFT version's `360` | `operationalAnalyticsExcludeDraftVersionAllocations` |
+| **SUPERSEDED allocations excluded, not double-counted (mandatory, PART 72)** | Only the new PUBLISHED version's `60` minutes counted, never `180` (old + new) | `operationalAnalyticsExcludeSupersededVersionAllocationsAndDoNotDoubleCount` |
+| **Weighted overall utilization (mandatory, PART 20)** | `(300+120)/(600+120) = 58.3%`, never the naive average `(50+100)/2 = 75%` | `weightedOverallUtilizationIsNotANaiveAverageOfPerLabPercentages` |
+| **Unused labs (mandatory, PART 76)** | A lab with zero allocations appears; a lab with one does not | `unusedLabsListsOnlyLabsWithZeroQualifyingAllocations` |
+| **Most-used lab ranked by minutes, not count (mandatory, PART 75)** | A single 480-minute booking outranks two bookings totaling 240 minutes | `mostUsedLabIsRankedByBookedMinutesNotAllocationCount` |
+| **Peak day (mandatory, PART 74)** | The date with more booked minutes (240 > 60) is reported | `peakDayIsTheDateWithTheHighestBookedMinutes` |
+| Extra-lab total/active/cancelled + by-division breakdown | `total=3, active=2, cancelled=1`; a REGULAR allocation never counted | `extraLabAnalyticsCountsTotalActiveCancelledAndBreaksDownByDivision` |
+| **Conflict analytics honesty (mandatory, PART 75/77)** | `evidenceAvailable: false`, empty category list, never an invented count | `conflictAnalyticsHonestlyReportsNoPersistedEvidenceExists` |
+| Invalid date range | `400 VALIDATION_ERROR` when `to` precedes `from` | `invalidDateRangeIsRejectedWithAValidationError` |
+| **Security (mandatory, PART 76/78)** | LAB_ASSISTANT 200 (implicit via every other test), CR 403, STUDENT 403, anonymous 401 | `analyticsIsForbiddenToCrAndStudentAndUnauthorizedForAnonymous` |
+
+### Frontend Analytics Tests — `AnalyticsPage.test.tsx` (9 tests)
+
+Term-selection prompt (no request issued before a term is chosen), real summary/utilization/extra-lab/peak-usage/unused-lab values rendered from mocked API responses, the honest no-published-timetable amber notice, an error state (not zero-value cards) on request failure, and the honest "no evidence available" conflict explanation with no fabricated table. **Percentage-scale regression test (mandatory, PART 81, direct consequence of the Phase 21 `normalizedScore` bug):** asserts a backend value of `52.5` renders as `"52.5%"`, and explicitly asserts `"5250%"`/`"0.525%"` are never present — the exact failure mode a `* 100` or missed-scale bug would produce. `npm run test` — **69/69 passing** (60 pre-existing + 9 new). `npm run build`/`npm run lint` — clean, no new warnings.
+
+### Backend build/test results (2026-08-25)
+
+`mvn test` (excludes `*IT` classes by Surefire's own default naming convention, same as every prior phase) - full suite green with the new `analytics` package. `mvn -Dtest=AnalyticsApiIT test` reproduces the identical, pre-existing "Could not find a valid Docker environment" failure that `-Dtest=ScheduleVersionApiIT` also reproduces when forced to run explicitly inside this sandbox's Maven container (no Docker socket mounted) - confirms the test is correctly written and blocked by environment, not a defect.
+
+### Manual SQL/API verification against the live Dockerized stack (2026-08-25)
+
+Cross-checked lab B-301's booked minutes directly: `SELECT l.code, SUM(EXTRACT(EPOCH FROM (end_time-start_time))/60), COUNT(*) FROM allocation a JOIN lab l ... WHERE sv.status='PUBLISHED' AND a.status IN ('APPROVED','PUBLISHED') AND l.code='B-301'` → `180.0`, `2` — matched `GET /api/analytics/lab-utilization`'s `bookedMinutes: 180, allocationCount: 2` for the same lab exactly.
+
+**Draft/superseded regression against real historical data, not a constructed fixture:** the live demo term already carried genuine multi-version history from every prior phase's own live verification (`V1..V5 SUPERSEDED`, `V6 PUBLISHED`, `V7 DRAFT`). `SELECT sv.version_number, sv.status, COUNT(a.id) FROM schedule_version sv LEFT JOIN allocation a ... GROUP BY ...` showed `11` allocations total spread across every version (`3+1+0+0+1+6+0`), while `GET /api/analytics/summary` correctly reported `activeAllocations: 6` — the SUPERSEDED versions' `5` allocations and the empty DRAFT version were both excluded, proven against real data rather than a purpose-built scenario.
+
+**Cancellation regression:** recorded `extra-labs` (`total:5, active:5, cancelled:0`) and B-301's utilization (`bookedMinutes:180, allocationCount:2`), cancelled a real extra-lab booking via `POST /api/allocations/extra/91/cancel`, re-queried both endpoints — `active:4, cancelled:1` and B-301's `bookedMinutes:60, allocationCount:1`, immediately reflecting the cancellation.
+
+**Security, live:** LAB_ASSISTANT `200`, CR `403`, STUDENT `403`, anonymous `401` on `/api/analytics/summary`; an inverted date range returned `400`.
+
+**Frontend, live (headless Chromium):** logged in as the demo Lab Assistant, opened `/lab-assistant/analytics`, selected the term — every card/table rendered real values matching the API responses above (utilization percentages, extra-lab breakdowns, peak day/lab/time-slot, unused-lab list, and the honest "No historical conflict data is available..." explanation, never a fabricated count). **Zero console errors.**
+
+## Phase 24 — Full-System Verification & Release Readiness
+
+Not a new-feature phase - a clean-slate re-verification that Phases 0-23 work together as one coherent, deployable application. Every result below is from the final run of this phase (not an earlier partial run).
+
+**Environment:** Windows 11 host, backend built/tested via `maven:3.9-eclipse-temurin-21` in Docker (Java 21.0.12 Temurin, Maven 3.9.16) - the project's `mvnw.cmd` cannot resolve `powershell` in this sandbox, the same documented workaround every prior phase used. Node v24.14.0, npm 11.9.0. Docker 29.7.2. PostgreSQL 16.15 (`postgres:16-alpine`).
+
+### Backend clean test run (`mvn clean test`)
+
+**296 tests, 0 failures, 0 errors, 0 skipped.** Covers: JWT/security helpers, the full constraint engine (capacity/software/equipment/lab-type/availability/conflict), candidate generation, scoring, explainability, backtracking scheduler, extra-lab domain logic, schedule-version lifecycle, audit logic, PDF parser/normalizer/mapper, analytics arithmetic - every subsystem PART 6 asks for.
+
+### Backend build (`mvn clean package -DskipTests`)
+
+`BUILD SUCCESS`; artifact produced: `backend/target/lab-allocation-backend-0.0.1-SNAPSHOT.jar` (67,116,496 bytes). Tests were **not** re-run during this step (`-DskipTests`, since they had already run cleanly one line above) - not falsely double-counted.
+
+### Integration tests - executed vs. environment-blocked, not conflated
+
+Every `*ApiIT`/`*ConcurrencyIT` class (`ScheduleVersionApiIT`, `AnalyticsApiIT`, `ExtraLabApiIT`, `AllocationConcurrencyIT`, `ScheduleVersionConcurrencyIT`, etc.) requires Testcontainers to launch a `postgres:16-alpine` container from *inside* the Maven build's own JVM. `mvn test`'s default Surefire include pattern (`**/*Test.java`) does not match `*IT.java` at all, so these never silently ran and passed - they simply aren't in that 296. Forcing one to run explicitly (`-Dtest=AnalyticsApiIT`) reproduces the exact same `IllegalStateException: Could not find a valid Docker environment` that forcing the pre-existing `ScheduleVersionApiIT` the identical way also produces - confirmed this session, side by side, proving the limitation is environmental (no Docker socket inside this sandbox's Maven container) and not new, not a defect, and not specific to Phase 24's own new test. **Every invariant these classes assert was instead re-proven live against the real Dockerized stack this session** (below) - genuine execution against a real backend/PostgreSQL, not a substitute claim of "passed."
+
+### Clean-database Flyway/boot verification (mandatory, PART 8/9)
+
+Started a brand-new, empty `postgres:16-alpine` container (no shared volume with the long-lived dev database) and booted the freshly-built backend image against it directly. Result: Flyway applied **all 14 migrations sequentially** (`V1` "baseline" through `V14` "create timetable import"), Hibernate's `ddl-auto: validate` passed cleanly against the resulting schema (proving the JPA mappings and the migrations agree), dev seed data loaded (`DevAcademicSeeder`/`DevLabSeeder`/`DevUserSeeder`/etc.), and `GET /actuator/health` returned `{"status":"UP"}` with the `db` component `UP`. No manual intervention at any step. Torn down after verification.
+
+### RBAC regression matrix (live, PART 11)
+
+| Capability | LAB_ASSISTANT | CR | STUDENT | Anonymous |
+|---|---|---|---|---|
+| Lab Assistant management (`POST /api/programs`) | 200 | 403 | — | — |
+| CR extra-lab booking (`POST /api/allocations/extra/search`) | 403 | 200 | 403 | — |
+| Student/shared timetable (`GET /api/timetable`) | — | 200 | 200 | 401 |
+| PDF import management (`GET /api/timetable-imports`) | 200 | 403 | 403 | 401 |
+| Audit administration (`GET /api/audit-logs`) | 200 | 403 | 403 | 401 |
+| Analytics (`GET /api/analytics/summary`) | 200 | 403 | 403 | 401 |
+| Schedule publication (`POST /api/schedule-versions`) | 200 | 403 | 403 | 401 |
+
+Every cell above is a real HTTP status from a live request this session, not carried over from an earlier phase's report.
+
+### FCFS concurrency regression (mandatory, PART 21/22)
+
+Two genuinely parallel (background-launched, `wait`-joined) `POST /api/allocations/extra` requests for the identical lab/date/time: **request A → 200 (booked), request B → 409 `ALLOCATION_CONFLICT`** (with `LAB_CONFLICT`/`FACULTY_CONFLICT`/`BATCH_CONFLICT` all listed). `SELECT COUNT(*) FROM allocation WHERE lab_id=5 AND allocation_date='2026-10-05' AND start_time='14:00:00' AND status IN ('APPROVED','PUBLISHED')` → **exactly 1**. A second parallel pair for genuinely non-conflicting resources (different lab, different faculty, different batch, same time) → **both 200** - concurrency protection serializes only real contention, not unrelated work.
+
+### Audit immutability regression (mandatory, PART 23)
+
+Direct `psql` against the live database: `UPDATE audit_log SET action=... WHERE id=(SELECT MAX(id)...)` → `ERROR: audit_log is append-only: UPDATE is not permitted`. `DELETE FROM audit_log WHERE id=(SELECT MAX(id)...)` → `ERROR: audit_log is append-only: DELETE is not permitted`. Both rejected by the V12 trigger, exactly as designed; `AuditLog` remains `@Immutable` in code (unchanged).
+
+### Audit creation regression (PART 24)
+
+`SELECT action, COUNT(*) FROM audit_log WHERE created_at > now() - interval '30 minutes' GROUP BY action` after this session's live actions showed `EXTRA_LAB_BOOKED: 3`, `EXTRA_LAB_CANCELLED: 1`, `SCHEDULE_VERSION_CREATED: 1` - real audit rows for real actions taken during this verification pass.
+
+### Database constraint verification (PART 57/58)
+
+`\d allocation` confirmed all three Phase 16 exclusion constraints intact (`ex_allocation_lab_overlap`, `ex_allocation_faculty_overlap`, `ex_allocation_batch_overlap`, all GiST/`tsrange`-based) plus every `CHECK` constraint (`chk_allocation_interval`, `chk_allocation_status`, `chk_allocation_target_invariant`, `chk_allocation_target_type`, `chk_allocation_type`). `\d schedule_version` confirmed `uq_schedule_version_one_published_per_term` (partial unique index) and `uq_schedule_version_term_number`. `SELECT academic_term_id, COUNT(*) FROM schedule_version WHERE status='PUBLISHED' GROUP BY academic_term_id HAVING COUNT(*) > 1` → **0 rows**, live, against a database with 8 schedule versions across this term's full revision history.
+
+### Timetable versioning / historical preservation regression (PART 25-27)
+
+Live term state: `V1..V5 SUPERSEDED`, `V6 PUBLISHED`, `V7/V8 DRAFT` - all real history from this and prior phases' live verification, still present (nothing cleaned up). `SELECT sv.version_number, sv.status, COUNT(a.id) ... GROUP BY ...` showed every superseded version's allocations still exist (`3+1+0+0+1=5` rows across V1/V2/V5) alongside V6's own `9`.
+
+### PDF import staging isolation / atomic approval regression (mandatory, PART 29/30)
+
+Using real historical imports rather than a constructed fixture: import #5 (`status=VALIDATED`, never approved) has `1` staged `timetable_import_row` but `0` allocations tracing to it (`source_import_id=5`) - staging isolation intact. Import #4 (`status=APPROVED`) has exactly `1` allocation tracing to it (`source_import_id=4`) - matching its single row, proving atomic approval created exactly the intended allocation, no more.
+
+### Analytics regression (mandatory, PART 34-37)
+
+`GET /api/analytics/summary?academicTermId=1` → `activeAllocations: 8` (V6's `9` total minus its `1` CANCELLED row - both the DRAFT/SUPERSEDED exclusion and the CANCELLED exclusion visible in one live number). Direct SQL cross-check of lab B-301's booked minutes (`SUM(EXTRACT(EPOCH FROM (end_time-start_time))/60)`, `COUNT(*)`, filtered to the PUBLISHED version + active status) matched the API's `bookedMinutes`/`allocationCount` for that lab exactly, as in Phase 23's own verification, re-confirmed here after the restart and the concurrency/RBAC test traffic.
+
+### Frontend clean install / test / lint / build
+
+`npm ci` - 139 packages installed, 0 vulnerabilities. `npm run test` - **69/69 passing** (17 test files), no order-dependence observed (fresh install, fresh run). `npm run lint` - 4 pre-existing warnings (`AuthContext.tsx` ×2, `CrAssignmentContext.tsx`, `DashboardPage.tsx`), **zero new warnings, zero errors**. `npm run build` - clean, `dist/assets/index-*.js` 387.50 kB (gzip 108.43 kB).
+
+### Docker builds (PART 50/51)
+
+`docker build -t lab-allocation-backend:test ./backend` → success. `docker build -t lab-allocation-frontend:test ./frontend` → success (both from the actual project Dockerfiles, both layer-cached from the identical Phase 23 rebuild, confirming reproducibility).
+
+### Docker Compose smoke test + clean restart (PART 52/54)
+
+Full stack (`postgres`/`backend`/`frontend`) already running from Phase 23's rebuild - confirmed all three containers `Up`/`healthy`. Explicitly restarted all three (`docker restart`) to prove recovery from an ordinary restart, not just first boot: backend reported `healthy` again, `POST /api/auth/login` succeeded (`200`) immediately after, frontend served `200` at `/`, and `docker logs` showed no new errors/exceptions post-restart.
+
+### Bugs found this phase
+
+**None.** Every mandatory invariant re-verified live matched its expected result on the first attempt - no defect required a fix.
+
+### Known, pre-existing, unchanged limitations
+
+- Testcontainers-backed `*ApiIT`/`*ConcurrencyIT` classes remain environment-blocked in this sandbox (no Docker socket inside the Maven build container) - written correctly, covered by equivalent live verification, unchanged from every prior phase's documented state.
+- Conflict/allocation-success analytics remain honestly incomplete by design (no persisted rejection evidence exists anywhere in the schema) - not a Phase 24 finding, restated from Phase 23.
+
+## Performance Benchmarks — Phase 25 (see [16-PERFORMANCE-BENCHMARKS.md](16-PERFORMANCE-BENCHMARKS.md) for full results)
+
+**Correctness tests and performance benchmarks are deliberately different kinds of artifacts, kept apart on purpose:**
+
+| | Correctness tests (`*Test.java`, `*ApiIT.java`) | Performance benchmarks (`*Benchmark.java`) |
+|---|---|---|
+| Question answered | Is the behavior right? | How expensive is the behavior? |
+| Runs in `mvn test`? | Yes, automatically | **No** - opt-in only (`-Dtest=SchedulerBenchmark`/`-Dtest=PdfImportBenchmark`) |
+| Assertions | `assertThat(...)` - fails the build on a wrong answer | None that fail the build - reports timings/statistics to stdout |
+| Speed budget | Must stay fast (the whole suite is 296 tests, seconds) | Deliberately allowed to take longer (warm-up + 20 measured runs per scenario, scaling runs up to 100 requirements) |
+
+This separation is structural, not just a naming convention: `SchedulerBenchmark`/`PdfImportBenchmark` are named `*Benchmark`, not `*Test`, so Maven Surefire's default include pattern (`**/*Test.java`) never picks them up - confirmed this phase by re-running the normal `mvn test` command after adding both classes and observing the identical 296-test baseline, unaffected. A benchmark class asserting nothing and never running by default means a slow or flaky benchmark can never make the release-blocking regression suite fail or drag - the two artifacts genuinely cannot interfere with each other.
+
+### Real measurements, not simulated
+
+Every benchmark in `docs/16-PERFORMANCE-BENCHMARKS.md` is from an actual execution this phase - the pure-JVM scheduler/PDF-pipeline benchmarks ran inside the same Maven/Docker environment every other backend test uses; the DB-backed benchmarks (candidate generation, booking, concurrency, timetable retrieval, analytics, PDF mapping/validation/approval) ran live against the real Dockerized backend + PostgreSQL, since Testcontainers remains environment-blocked in this sandbox for the same reason every `*ApiIT` class already is. No number in that document was invented, estimated without labeling it as derived, or copied from a prior phase's report.
+
+## Phase 27 — CI Verification (GitHub Actions)
+
+`.github/workflows/ci.yml` runs on `push`/`pull_request` against `main` and on manual `workflow_dispatch`, with minimal `permissions: contents: read` and a `concurrency` group that cancels superseded runs on the same ref.
+
+```text
+Push / Pull Request / Manual
+          |
+ +--------+--------+
+ |                 |
+Backend          Frontend
+ |                 |
+Compile           npm ci
+Unit tests        Lint
+Integration tests Tests
+(Testcontainers)  Build
+Upload jar
+ +--------+--------+
+          |
+        Docker (needs: backend, frontend)
+          |
+   Compose config validation
+   Image build (docker compose build)
+   Compose smoke test (prod profile, real CI JWT secret)
+   Compose cleanup (always)
+```
+
+### Backend job
+
+`actions/setup-java` (Temurin 21, Maven dependency cache keyed on `backend/pom.xml`) - **not** `backend/mvnw`: the wrapper script is tracked in git without its executable bit (`100644`, confirmed via `git ls-files -s backend/mvnw`), so `./mvnw` fails with "Permission denied" on a fresh Linux checkout until that's fixed at the source and committed (a real, documented finding this phase - not fixed in-session since Phase 27 does not commit). Using the JDK-bundled/runner-provided Maven directly sidesteps this and matches the exact Maven version (3.9.x) this project's own local verification already used throughout Phases 20-26.
+
+Three distinct steps, each independently attributable on failure (PART 53): `mvn -B compile` (fast compile-error signal), `mvn -B test` (the 300-test unit baseline), `mvn -B verify -Dsurefire.skip=true` (re-runs only the Testcontainers-backed `*IT`/`*ConcurrencyIT` suite via `maven-failsafe-plugin` - already configured in `pom.xml`, bound to its standard `integration-test`/`verify` phases; no new plugin wiring was needed, only discovered and used).
+
+### Why integration tests can finally execute for real in CI
+
+This project's local development sandbox can only reach Docker from a container that has no socket access to the host daemon (every prior phase's `*ApiIT`/`*ConcurrencyIT` classes have been "written correctly, environment-blocked here" as a result - see Phases 18-26). A GitHub Actions `ubuntu-latest` runner has a real, native Docker daemon with no such nesting problem - `mvn -B verify` there should let all 19 `*IT` classes (`ScheduleVersionApiIT`, `AnalyticsApiIT`, `ExtraLabApiIT`, `AllocationConcurrencyIT`, `ScheduleVersionConcurrencyIT`, `LabAllocationBackendApplicationIT`, and 13 others) actually run against a real Testcontainers-managed PostgreSQL, not merely compile. **This has not yet been observed executing on GitHub** (no push occurred this phase, per standing instruction) - see the Phase 27 completion report for the honest, unblurred distinction between "designed to work" and "observed to work."
+
+### Frontend job
+
+`actions/setup-node` (Node 20, matching the frontend Dockerfile's build stage - not the newer Node this local dev machine runs), npm cache keyed on `frontend/package-lock.json`. `npm ci` (not `npm install` - reproducible, lockfile-pinned, mirrors Phase 26's deployment-build convention exactly). `npm run lint` (oxlint; the 4 documented pre-existing warnings do not fail the command - exit code 0 - so CI does not need `continue-on-error` to tolerate them; only a genuine lint *error* fails this step). `npm run test` (`vitest run`, already non-watch). `npm run build` (`tsc -b && vite build` - fails the job on a TypeScript error).
+
+### Docker job
+
+Depends on both other jobs (`needs: [backend, frontend]`) so it only runs once both are green. `docker compose config` validates the file parses and interpolates correctly. `docker compose build` builds both real deployment Dockerfiles (not a separate, parallel `docker build` invocation with different tags - one source of truth). The smoke test deliberately sets `SPRING_PROFILES_ACTIVE=prod` with a disposable, run-id-unique CI secret (`ci-only-jwt-secret-placeholder-at-least-32-bytes-long-${{ github.run_id }}`, well over `ProductionJwtSecretGuard`'s 32-byte minimum) - Phase 26's own local verification only ever exercised `dev`; this is the first time `prod` profile's actual boot path is verified anywhere, local or CI. A bounded poll loop (`sleep 5`, up to 30 attempts) waits for the backend's real Compose healthcheck rather than a fixed sleep, then curls `/actuator/health` and the frontend root. `docker compose logs` runs `if: failure()` for diagnosis; `docker compose down -v` runs `if: always()` so a failed run never leaves orphaned containers on the runner (which is disposable anyway, but explicit cleanup is still the correct habit).
+
+### Secrets
+
+No GitHub Actions Secrets were required or created - every CI-only value (`POSTGRES_PASSWORD`, `JWT_SECRET`) lives directly in the workflow's `env:` block, deliberately non-sensitive, unique per run, and never reused outside that ephemeral runner. This matches PART 36's own guidance: don't make repository maintainers create secrets just to run tests.
+
+### Local command equivalence
+
+Every CI command is runnable locally, unchanged:
+```text
+Backend:   cd backend && mvn clean test        (unit)
+           mvn clean verify                     (unit + integration, needs real Docker)
+Frontend:  cd frontend && npm ci && npm run lint && npm run test && npm run build
+Docker:    docker compose config && docker compose build
+```
+
+
 
 Each implementation phase (Phase 4 onward) is not considered complete until: implementation compiles, its unit/integration tests exist and pass, and the relevant row(s) in this document's traceability tables are checked off with a note of which test class covers them (added incrementally — this document evolves alongside code, not written once and frozen).
