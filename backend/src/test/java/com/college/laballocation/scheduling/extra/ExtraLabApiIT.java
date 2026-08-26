@@ -387,7 +387,7 @@ class ExtraLabApiIT {
         assertThat(reBookResponse.getStatusCode()).isEqualTo(HttpStatus.OK);
 
         // Cross-CR cancel: a different CR (different division) cannot cancel this allocation.
-        Fixture otherFixture = seedFixture("CANCELOTHER", 30);
+        Fixture otherFixture = seedFixture("CNCLOTH", 30);
         AppUser otherCr = seedUser(UserRole.CR, "extra-cr-cancel-other@example.edu");
         crAssignmentRepository.save(new CrAssignment(otherCr, otherFixture.division(), otherFixture.term(), otherCr));
         ResponseEntity<String> crossCrCancel = restTemplate.exchange(

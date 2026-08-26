@@ -189,17 +189,19 @@ class AnalyticsApiIT {
     private Allocation seedAllocation(
             Fixture fixture, Lab lab, ScheduleVersion version, AppUser createdBy, AllocationType type, AllocationStatus status,
             LocalDate date, LocalTime start, LocalTime end) {
-        return seedAllocation(fixture, lab, fixture.faculty(), version, createdBy, type, status, date, start, end);
+        return seedAllocation(fixture, lab, fixture.faculty(), fixture.batch(), version, createdBy, type, status, date, start, end);
     }
 
-    // A second, simultaneous allocation in a different lab needs its own faculty - the same person
-    // can't teach two overlapping sessions at once, and the real ex_allocation_faculty_overlap
-    // exclusion constraint correctly rejects that regardless of which lab is involved.
+    // A second, simultaneous allocation in a different lab needs its own faculty AND batch - the
+    // same faculty can't teach two overlapping sessions at once, and the same batch of students
+    // can't be in two labs at once either; the real ex_allocation_faculty_overlap/
+    // ex_allocation_batch_overlap exclusion constraints correctly reject either regardless of
+    // which lab is involved.
     private Allocation seedAllocation(
-            Fixture fixture, Lab lab, Faculty faculty, ScheduleVersion version, AppUser createdBy, AllocationType type,
-            AllocationStatus status, LocalDate date, LocalTime start, LocalTime end) {
+            Fixture fixture, Lab lab, Faculty faculty, Batch batch, ScheduleVersion version, AppUser createdBy,
+            AllocationType type, AllocationStatus status, LocalDate date, LocalTime start, LocalTime end) {
         Allocation allocation = Allocation.forBatch(
-                type, fixture.division(), fixture.batch(), fixture.subject(), faculty, lab, date, start, end, status, version, createdBy);
+                type, fixture.division(), batch, fixture.subject(), faculty, lab, date, start, end, status, version, createdBy);
         return allocationRepository.saveAndFlush(allocation);
     }
 
@@ -279,8 +281,9 @@ class AnalyticsApiIT {
         AppUser labAssistant = seedUser(UserRole.LAB_ASSISTANT, "an-la-weighted@example.edu");
         ScheduleVersion version = publishedVersion(fixture, labAssistant);
         Faculty secondFaculty = facultyRepository.save(new Faculty("AN-FAC-WEIGHTED2", "Faculty WEIGHTED2", null, null));
+        Batch secondBatch = batchRepository.save(new Batch(fixture.division(), "B", 30));
         seedAllocation(fixture, labA, version, labAssistant, AllocationType.REGULAR, AllocationStatus.PUBLISHED, MONDAY, LocalTime.of(9, 0), LocalTime.of(14, 0));
-        seedAllocation(fixture, labB, secondFaculty, version, labAssistant, AllocationType.REGULAR, AllocationStatus.PUBLISHED, MONDAY, LocalTime.of(9, 0), LocalTime.of(11, 0));
+        seedAllocation(fixture, labB, secondFaculty, secondBatch, version, labAssistant, AllocationType.REGULAR, AllocationStatus.PUBLISHED, MONDAY, LocalTime.of(9, 0), LocalTime.of(11, 0));
         labUnavailabilityRepository.save(new LabUnavailability(
                 labB, timeMapper.toInstant(MONDAY, LocalTime.of(11, 0)), timeMapper.toInstant(MONDAY, LocalTime.of(19, 0)), "maintenance", labAssistant));
 
@@ -325,9 +328,10 @@ class AnalyticsApiIT {
         AppUser labAssistant = seedUser(UserRole.LAB_ASSISTANT, "an-la-peaklab@example.edu");
         ScheduleVersion version = publishedVersion(fixture, labAssistant);
         Faculty secondFaculty = facultyRepository.save(new Faculty("AN-FAC-PEAKLAB2", "Faculty PEAKLAB2", null, null));
+        Batch secondBatch = batchRepository.save(new Batch(fixture.division(), "B", 30));
         seedAllocation(fixture, busyShortLab, version, labAssistant, AllocationType.REGULAR, AllocationStatus.PUBLISHED, MONDAY, LocalTime.of(9, 0), LocalTime.of(11, 0));
         seedAllocation(fixture, busyShortLab, version, labAssistant, AllocationType.REGULAR, AllocationStatus.PUBLISHED, MONDAY, LocalTime.of(11, 0), LocalTime.of(13, 0));
-        seedAllocation(fixture, busyLongLab, secondFaculty, version, labAssistant, AllocationType.REGULAR, AllocationStatus.PUBLISHED, MONDAY, LocalTime.of(9, 0), LocalTime.of(17, 0));
+        seedAllocation(fixture, busyLongLab, secondFaculty, secondBatch, version, labAssistant, AllocationType.REGULAR, AllocationStatus.PUBLISHED, MONDAY, LocalTime.of(9, 0), LocalTime.of(17, 0));
 
         ResponseEntity<String> response = restTemplate.exchange(
                 url("/api/analytics/peak-usage?academicTermId=" + fixture.term().getId()), HttpMethod.GET,

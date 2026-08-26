@@ -33,6 +33,7 @@ import com.college.laballocation.scheduling.ScheduleVersion;
 import com.college.laballocation.scheduling.ScheduleVersionRepository;
 import com.college.laballocation.scheduling.SchedulingRequest;
 import com.college.laballocation.scheduling.TargetType;
+import com.college.laballocation.scheduling.explanation.ExplainableAllocationService;
 import com.college.laballocation.subject.Subject;
 import com.college.laballocation.subject.SubjectRepository;
 import com.college.laballocation.user.AppUser;
@@ -108,6 +109,9 @@ class AlternativeSuggestionIT {
     private AllocationRepository allocationRepository;
 
     @Autowired
+    private ExplainableAllocationService explainableAllocationService;
+
+    @Autowired
     private ScheduleVersionRepository scheduleVersionRepository;
 
     @Autowired
@@ -129,7 +133,7 @@ class AlternativeSuggestionIT {
         AcademicTerm term = academicTermRepository.save(
                 new AcademicTerm("IT-ALT-YR-" + suffix, 1, "Test Term " + suffix, LocalDate.of(2026, 1, 1), LocalDate.of(2026, 6, 30)));
         term.updateStatus(TermStatus.ACTIVE);
-        return term;
+        return academicTermRepository.saveAndFlush(term);
     }
 
     private LabType seedLabType(String suffix) {
@@ -178,6 +182,13 @@ class AlternativeSuggestionIT {
         SchedulingRequest request = new SchedulingRequest(
                 AllocationType.EXTRA, TargetType.BATCH, division.getId(), batch.getId(), subject.getId(), faculty.getId(), term.getId(),
                 MONDAY, LocalTime.of(9, 0), LocalTime.of(11, 0), null);
+
+        var directRecommendation = explainableAllocationService.recommend(request);
+        System.out.println("[DIAG] direct recommend() status=" + directRecommendation.status()
+                + " totalCandidates=" + directRecommendation.totalCandidatesEvaluated()
+                + " validCount=" + directRecommendation.validCandidateCount());
+        directRecommendation.rejectedCandidates().forEach(r -> System.out.println(
+                "[DIAG] rejected lab=" + r.labCode() + " violations=" + r.violations()));
 
         AlternativeSearchResult result = alternativeSuggestionService.findAlternatives(request);
 
